@@ -3,7 +3,7 @@
 # 阻抗控制器配置
 impedance_controller:
   # 平移刚度 (N/m), 旋转刚度 (Nm/rad)
-  stiffness: [4000.0, 4000.0, 4000.0, 50.0, 50.0, 50.0]
+  stiffness: [2000.0, 2000.0, 2000.0, 50.0, 50.0, 50.0]
   # 阻尼比
   damping_ratio: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
 
@@ -22,5 +22,5 @@ safety:
 
 trajectory:
   circle_radius: 0.15
-  circle_omega: 1.2
+  circle_omega: 0.8
   control_dt: 0.002

@@ -109,8 +109,8 @@ int main(int argc, char* argv[]) {
         }
 
         x_des = x_start;
-        x_des[1] = x_start[1] + cfg.circle_radius * std::sin(cfg.circle_omega * t_traj);
-        x_des[2] = x_start[2] + cfg.circle_radius * (1.0 - std::cos(cfg.circle_omega * t_traj)); 
+        x_des[0] = x_start[0] + cfg.circle_radius * std::sin(cfg.circle_omega * t_traj);
+        x_des[1] = x_start[1] + cfg.circle_radius * (1.0 - std::cos(cfg.circle_omega * t_traj));
         t_traj += dt;
 
         Eigen::Vector3d pos_err = x_curr - x_des;
