@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 寻找依赖项
 find_package(Eigen3 REQUIRED)
 find_package(pinocchio REQUIRED)
+find_package(yaml-cpp REQUIRED)
 find_package(Threads REQUIRED)
 
 # 设置 ur_client_library 路径 (使用相对 CMakeLists.txt 的路径)
@@ -19,6 +20,7 @@ set(URCL_LIB_DIR ${URCL_ROOT}/build)
 
 # 包含路径
 include_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${URCL_INCLUDE_DIR}
     ${URCL_3RDPARTY_DIR}
     ${EIGEN3_INCLUDE_DIR}
@@ -28,10 +30,10 @@ include_directories(
 add_executable(torque_ctrl src/torque_ctrl.cpp)
 
 # 链接库
-# 注意：ur_client_library 的库文件名可能是 liburcl.so
 target_link_libraries(torque_ctrl
     ${URCL_LIB_DIR}/liburcl.so
     pinocchio::pinocchio
+    yaml-cpp
     Threads::Threads
 )
 

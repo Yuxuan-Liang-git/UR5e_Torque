@@ -1,0 +1,11 @@
+# 机器人资源路径配置
+paths:
+  ur5e_model: "./ur_client_library/urdf/ur5e.urdf"
+  init_pos_file: "./ur_client_library/init_pos.txt"
+  rtde_output_recipe: "./ur_client_library/examples/resources/rtde_output_recipe.txt"
+  rtde_input_recipe: "./ur_client_library/examples/resources/rtde_input_recipe.txt"
+  external_script: "./ur_client_library/resources/external_control.urscript"
+
+# 机器人连接配置
+robot:
+  ip: "192.168.56.101"
