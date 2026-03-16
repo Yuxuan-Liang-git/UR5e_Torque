@@ -67,3 +67,7 @@ target_link_libraries(external_fts_through_rtde ur_client_library::urcl)
 add_executable(torquetest
 torquetest.cpp)
 target_link_libraries(torquetest ur_client_library::urcl pinocchio::pinocchio)
+
+add_executable(init_pos
+init_pos.cpp)
+target_link_libraries(init_pos ur_client_library::urcl)
