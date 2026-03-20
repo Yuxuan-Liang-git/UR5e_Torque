@@ -21,6 +21,6 @@ safety:
   torque_limits: [20.0, 20.0, 20.0, 10.0, 10.0, 10.0]
 
 trajectory:
-  circle_radius: 0.15
+  circle_radius: 0.1
   circle_omega: 0.8
   control_dt: 0.002

@@ -9,6 +9,7 @@ Config cfg;
 Eigen::MatrixXd Kd = Eigen::MatrixXd::Zero(6, 6);
 Eigen::MatrixXd Dd = Eigen::MatrixXd::Zero(6, 6);
 
+// 从配置文件中读取设置的控制器参数
 void configureImpedance() {
     for (int i = 0; i < 6; ++i) {
         Kd(i, i) = cfg.stiffness_diag[i];
@@ -94,6 +95,7 @@ int main(int argc, char* argv[]) {
                 if (!initial_captured) {
                     Eigen::VectorXd q_vec(6);
                     for (int i = 0; i < 6; ++i) q_vec[i] = q_init[i];
+                    // 使用Pinocchio计算初始末端位置和姿态
                     pinocchio::Data data_init(model);
                     pinocchio::forwardKinematics(model, data_init, q_vec);
                     pinocchio::updateFramePlacements(model, data_init);
@@ -114,6 +116,7 @@ int main(int argc, char* argv[]) {
         t_traj += dt;
 
         Eigen::Vector3d pos_err = x_curr - x_des;
+        // 把当前旋转矩阵转换为四元数，并确保与目标四元数在同一半空间（q与-q表示相同旋转）
         Eigen::Quaterniond q_curr(R_curr);
         if (q_curr.dot(quat_des) < 0.0) q_curr.coeffs() *= -1.0;
         Eigen::Quaterniond q_err = q_curr * quat_des.inverse();
