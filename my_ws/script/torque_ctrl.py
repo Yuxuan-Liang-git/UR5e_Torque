@@ -20,6 +20,9 @@ import mujoco.viewer
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
 
+# Global visualization frequency (Hz), shared by control and visualization threads.
+VIS_FREQ = 50.0
+
 class UDPLogger:
     def __init__(self, ip="127.0.0.1", port=9870, send_every_n=5):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -100,6 +103,14 @@ def draw_trajectory(viewer, positions, color=[0, 1, 0, 1], width=0.002, clear=Fa
         from_pos = np.array(positions[i][:3], dtype=np.float64)
         to_pos = np.array(positions[i + 1][:3], dtype=np.float64)
         
+        mujoco.mjv_initGeom(
+            viewer.user_scn.geoms[viewer.user_scn.ngeom],
+            mujoco.mjtGeom.mjGEOM_LINE,
+            [width, 0, 0],
+            from_pos,
+            np.eye(3).flatten(),
+            color
+        )
         mujoco.mjv_connector(
             viewer.user_scn.geoms[viewer.user_scn.ngeom],
             mujoco.mjtGeom.mjGEOM_LINE,
@@ -107,18 +118,18 @@ def draw_trajectory(viewer, positions, color=[0, 1, 0, 1], width=0.002, clear=Fa
             from_pos,
             to_pos
         )
-        viewer.user_scn.geoms[viewer.user_scn.ngeom].rgba[0:4] = color
         viewer.user_scn.ngeom += 1
 
-
 class VisualizationWorker:
-    def __init__(self, xml_path):
+    def __init__(self, xml_path, render_hz=VIS_FREQ):
         self.model = mujoco.MjModel.from_xml_path(str(xml_path))
         self.data = mujoco.MjData(self.model)
-        self.queue = queue.Queue(maxsize=1)
         self.lock = threading.Lock()
+        self.latest_q = None
+        self.trajectory_points = []
+        self.target_trajectory = []
         self.running = True
-        self.latest = None
+        self.render_period = 1.0 / max(1.0, float(render_hz))
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
@@ -129,43 +140,46 @@ class VisualizationWorker:
                 viewer.cam.azimuth = 90
                 viewer.cam.elevation = -25
 
+                next_render = time.perf_counter()
                 while self.running and viewer.is_running():
-                    try:
-                        self.queue.get(timeout=0.05)
-                    except queue.Empty:
-                        pass
+                    now = time.perf_counter()
+                    if now < next_render:
+                        time.sleep(min(0.002, next_render - now))
+                        continue
 
                     with self.lock:
-                        if self.latest is None:
-                            continue
-                        q, trajectory_points, target_trajectory = self.latest
+                        q = None if self.latest_q is None else self.latest_q.copy()
+                        traj = list(self.trajectory_points)
+                        target_traj = list(self.target_trajectory)
 
-                    self.data.qpos[:6] = q
-                    mujoco.mj_forward(self.model, self.data)
+                    # MuJoCo passive viewer requires locking when mutating user_scn
+                    # from a non-viewer thread context.
+                    with viewer.lock():
+                        if q is not None:
+                            self.data.qpos[:6] = q
+                            mujoco.mj_forward(self.model, self.data)
+                            draw_trajectory(viewer, target_traj, color=[0, 1, 0, 1], clear=True, width=0.004)
+                            draw_trajectory(viewer, traj, color=[1, 0, 0, 1], width=0.004)
+                        else:
+                            viewer.user_scn.ngeom = 0
+                        viewer.sync()
 
-                    draw_trajectory(viewer, target_trajectory, color=[0, 1, 0, 1], clear=True, width=0.003)
-                    draw_trajectory(viewer, trajectory_points, color=[1, 0, 0, 1], width=0.003)
-                    viewer.sync()
+                    next_render += self.render_period
+                    if next_render < now:
+                        next_render = now + self.render_period
         except Exception as e:
             print(f"[WARN] Visualization thread stopped: {e}")
+        finally:
+            self.running = False
 
     def update(self, q, trajectory_points, target_trajectory):
-        try:
-            with self.lock:
-                self.latest = (
-                    np.array(q, copy=True),
-                    [np.array(p, copy=True) for p in trajectory_points],
-                    [np.array(p, copy=True) for p in target_trajectory],
-                )
+        with self.lock:
+            self.latest_q = np.array(q, copy=True)
+            self.trajectory_points = [np.array(p, copy=True) for p in trajectory_points]
+            self.target_trajectory = [np.array(p, copy=True) for p in target_trajectory]
 
-            if self.queue.full():
-                try:
-                    self.queue.get_nowait()
-                except queue.Empty:
-                    pass
-            self.queue.put_nowait(1)
-        except Exception:
-            pass
+    def is_running(self):
+        return self.running
 
     def stop(self):
         self.running = False
@@ -182,21 +196,17 @@ def parse_args():
 
 def rotation_error(R_d, R):
     """Compute the orientation error between two rotation matrices using quaternions."""
-    # Convert rotation matrices to quaternions
     q_d = np.zeros(4)
     q = np.zeros(4)
     mujoco.mju_mat2Quat(q_d, R_d.flatten())
     mujoco.mju_mat2Quat(q, R.flatten())
     
-    # Compute conjugate of current quaternion
     q_inv = np.zeros(4)
     mujoco.mju_negQuat(q_inv, q)
     
-    # Compute error quaternion: q_err = q_d * q_inv
     q_err = np.zeros(4)
     mujoco.mju_mulQuat(q_err, q_d, q_inv)
     
-    # Convert error quaternion to 3D velocity/error vector
     res = np.zeros(3)
     mujoco.mju_quat2Vel(res, q_err, 1.0)
     return res
@@ -204,18 +214,15 @@ def rotation_error(R_d, R):
 def main():
     args = parse_args()
     
-    # Load configs
     with open(args.config, 'r') as f:
         ctrl_cfg = yaml.safe_load(f)
     with open(args.sys_config, 'r') as f:
         sys_cfg = yaml.safe_load(f)
 
-    # Impedance parameters
     stiffness = np.array(ctrl_cfg['impedance_controller']['stiffness'])
     damping_ratio = np.array(ctrl_cfg['impedance_controller']['damping_ratio'])
     damping = damping_ratio * 2 * np.sqrt(stiffness) 
 
-    # Trajectory parameters
     circle_radius = ctrl_cfg['trajectory']['circle_radius']
     circle_omega = ctrl_cfg['trajectory']['circle_omega']
     dt = float(ctrl_cfg['trajectory']['control_dt'])
@@ -224,25 +231,20 @@ def main():
 
     torque_limits = np.array(ctrl_cfg['safety']['torque_limits'])
 
-    # Load MuJoCo model for kinematics/Jacobian
     xml_path = Path("script/universal_robots_ur5e/scene_torque.xml")
     if not xml_path.exists():
-        # Fallback to scene.xml if unique torque one doesn't exist
         xml_path = Path("script/universal_robots_ur5e/scene.xml")
     
     model = mujoco.MjModel.from_xml_path(str(xml_path))
     data = mujoco.MjData(model)
     ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
     if ee_site_id == -1:
-        # try another common name
         ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "eef_site")
 
-    # Connect to robot
     print(f"[INFO] Connecting to robot {args.robot_ip}")
     rtde_c = RTDEControlInterface(args.robot_ip)
     rtde_r = RTDEReceiveInterface(args.robot_ip)
 
-    # Initial state - try to read from init_pos file
     q_init = None
     init_pos_path = Path(args.init_pos)
     if init_pos_path.exists():
@@ -255,127 +257,103 @@ def main():
                         print(f"[INFO] Loaded initial joint position from {args.init_pos}")
                     else:
                         q_init = None
-                        print(f"[WARN] Invalid init_pos format (expected 6 values, got {len(q_init)}), using current position")
         except Exception as e:
-            print(f"[WARN] Failed to read init_pos file: {e}, using current position")
-    else:
-        print(f"[INFO] init_pos file not found at {args.init_pos}, using current robot position")
-
-    # Get initial position: either from file or current robot pose
+            print(f"[WARN] Failed to read init_pos file: {e}")
+    
     if q_init is not None:
         q = q_init
-        print(f"[INFO] Using init_pos as trajectory center: {q}")
     else:
         q = rtde_r.getActualQ()
-        print(f"[INFO] Using current robot position as trajectory center: {q}")
 
     data.qpos[:6] = q
     mujoco.mj_forward(model, data)
     
-    # Set circular trajectory center as the EE pose at initial joint position
     x_des_pos_init = data.site_xpos[ee_site_id].copy()
     x_des_rot = data.site_xmat[ee_site_id].reshape(3, 3).copy()
 
-    # Trajectory visualization containers
-    trajectory_points = []  # Actual (red)
-    target_trajectory = []  # Target (green)
+    trajectory_points = []
+    target_trajectory = []
     max_points = 200
     start_time = time.perf_counter()
 
-    print(f"[INFO] Initial EE pos: {x_des_pos_init}")
-    print(f"[INFO] Target control frequency: {1.0 / dt:.2f} Hz (dt={dt:.6f}s)")
-    print("[INFO] Starting impedance control with circular trajectory. Press Ctrl+C to stop.")
-
-    # UDP Logger
     logger = UDPLogger("127.0.0.1", 9870, send_every_n=5)
-    visualizer = VisualizationWorker(xml_path)
+    visualizer = VisualizationWorker(xml_path, render_hz=VIS_FREQ)
 
-    # Frequency calculation variables
     total_loop_count = 0
     freq_loop_count = 0
     freq_start_time = time.perf_counter()
     next_tick = time.perf_counter()
+    vis_period = 1.0 / max(1.0, float(VIS_FREQ))
+    next_vis_update = time.perf_counter()
+    traj_sample_period = 0.05  # 20 Hz trajectory point sampling
+    next_traj_sample = 0.0
 
     try:
         while True:
+            if not visualizer.is_running():
+                print("[INFO] Visualization closed, stopping controller loop.")
+                break
+
             t_now = time.perf_counter() - start_time
-            
-            # 1. Generate circular trajectory in XY plane
-            # x = x0 + R * cos(wt), y = y0 + R * sin(wt)
+                
             x_des_pos = x_des_pos_init.copy()
             x_des_pos[0] += circle_radius * (np.cos(circle_omega * t_now) - 1.0)
             x_des_pos[1] += circle_radius * np.sin(circle_omega * t_now)
-            
+                
             v_des_pos = np.array([
                 -circle_radius * circle_omega * np.sin(circle_omega * t_now),
                  circle_radius * circle_omega * np.cos(circle_omega * t_now),
                  0.0
             ])
 
-            # 2. Get current state
             q = rtde_r.getActualQ()
             dq = rtde_r.getActualQd()
-            
-            # 3. Update MuJoCo model
+                
             data.qpos[:6] = q
             data.qvel[:6] = dq
             mujoco.mj_forward(model, data)
-            
-            # 4. Compute Jacobian
-            # jacp: 3xNV, jacr: 3xNV
+                
             jacp = np.zeros((3, model.nv))
             jacr = np.zeros((3, model.nv))
             mujoco.mj_jacSite(model, data, jacp, jacr, ee_site_id)
-            J = np.vstack([jacp[:, :6], jacr[:, :6]]) # 6x6 for UR5e
-            
-            # 5. Compute EE velocity
+            J = np.vstack([jacp[:, :6], jacr[:, :6]])
+                
             v_ee = J @ dq
-            
-            # 6. Compute pose error
             x_curr_pos = data.site_xpos[ee_site_id]
             x_curr_rot = data.site_xmat[ee_site_id].reshape(3, 3)
-            
+                
             pos_err = x_des_pos - x_curr_pos
             rot_err = rotation_error(x_des_rot, x_curr_rot)
             err = np.concatenate([pos_err, rot_err])
-            
-            # Extended velocity error (assuming no orientation velocity for now)
             v_err = np.concatenate([v_des_pos, np.zeros(3)]) - v_ee
 
-            # 7. Task space force
-            # F = K * err + D * v_err
             F_task = stiffness * err + damping * v_err
-            
-            # 8. Map to joint torques
             tau = J.T @ F_task
-            
-            # 9. Limit torques for safety
             tau = np.clip(tau, -torque_limits, torque_limits)
-            
-            # 10. Send to robot (Robot handles gravity compensation)
+                
             ok = rtde_c.directTorque(tau.tolist(), True)
-            
             if not ok:
                 print("[ERROR] directTorque failed")
                 break
-                    
-            # 11. Update trajectory buffers
-            if not trajectory_points or (t_now % 0.05 < 0.002):
+                        
+            if (not trajectory_points) or (t_now >= next_traj_sample):
                 trajectory_points.append(x_curr_pos.copy())
                 target_trajectory.append(x_des_pos.copy())
                 if len(trajectory_points) > max_points:
                     trajectory_points.pop(0)
                     target_trajectory.pop(0)
+                next_traj_sample = t_now + traj_sample_period
 
             total_loop_count += 1
-
-            # Hand over latest control state to UDP thread.
             logger.update(total_loop_count, x_curr_pos, x_des_pos, tau, q, dq, F_task)
 
-            # Hand over visualization data to visualization thread.
-            visualizer.update(q, trajectory_points, target_trajectory)
+            now_for_vis = time.perf_counter()
+            if now_for_vis >= next_vis_update:
+                visualizer.update(q, trajectory_points, target_trajectory)
+                next_vis_update += vis_period
+                if next_vis_update < now_for_vis:
+                    next_vis_update = now_for_vis + vis_period
 
-            # Control Frequency Calculation and Printing
             freq_loop_count += 1
             if freq_loop_count >= 500:
                 now = time.perf_counter()
@@ -385,13 +363,11 @@ def main():
                 freq_loop_count = 0
                 freq_start_time = now
 
-            # Drive loop timing directly from configured dt.
             next_tick += dt
             sleep_time = next_tick - time.perf_counter()
             if sleep_time > 0.0:
                 time.sleep(sleep_time)
             else:
-                # If overrun occurs, realign to current time to avoid drift.
                 next_tick = time.perf_counter()
 
     except KeyboardInterrupt:
