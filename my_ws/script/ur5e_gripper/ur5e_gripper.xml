@@ -121,8 +121,6 @@
                   <geom pos="0 0.0863 0" quat="0.5 -0.5 -0.5 -0.5" type="mesh" rgba="0 0 0 1" mesh="robotiq_85_coupler" />
                   <geom pos="0 0.0903 0" quat="0.707107 0 0 0.707107" type="mesh" contype="0" conaffinity="0" group="1" density="0" mesh="robotiq_85_base_link" />
                   <geom pos="0 0.0903 0" quat="0.707107 0 0 0.707107" type="mesh" mesh="robotiq_85_base_link" />
-                  <geom size="0.02 0.015" pos="0 0.05 0.05" type="cylinder" contype="0" conaffinity="0" group="1" density="0" rgba="0.8 0.2 0 0.8" />
-                  <geom size="0.02 0.015" pos="0 0.05 0.05" type="cylinder" rgba="0.8 0.2 0 0.8" />
                   <body name="robotiq_85_left_knuckle_link" pos="-0.0306011 0.145205 0" quat="0 0.707107 0.707107 0">
                     <inertial pos="-0.0002 0.0199436 0.0292245" quat="0.946779 -0.321883 0 0" mass="0.00853198" diaginertia="2.89328e-06 2.80407e-06 2.82183e-07" />
                     <joint name="robotiq_85_left_knuckle_joint" pos="0 0 0" axis="0 0 1" range="0 0.80285" actuatorfrcrange="-1000 1000" />

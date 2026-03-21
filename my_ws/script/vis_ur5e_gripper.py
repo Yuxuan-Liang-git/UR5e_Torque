@@ -12,8 +12,8 @@ from matplotlib.animation import FuncAnimation
 
 # Cartesian impedance control gains.
 # 刚度得调得很高
-impedance_pos = np.asarray([5000.0, 5000.0, 5000.0])  # [N/m]
-impedance_ori = np.asarray([200000.0, 200000.0, 200000.0])  # [Nm/rad]
+impedance_pos = np.asarray([2000.0, 2000.0, 2000.0])  # [N/m]
+impedance_ori = np.asarray([100000.0, 100000.0, 100000.0])  # [Nm/rad]
 
 # Damping ratio for both Cartesian and joint impedance control.
 damping_ratio = 1.0
@@ -42,7 +42,7 @@ window_width = 5
 # IK 参数
 ik_max_iters = 30
 ik_tol = 1e-4
-ik_damping = 1e-3  # 阻尼因子，避免雅可比奇异
+ik_damping = 1e-2  # 阻尼因子，避免雅可比奇异
 ori_weight = 1.0   # 姿态误差权重，可调小以减缓旋转
 
 
@@ -427,8 +427,8 @@ def main() -> None:
     with mujoco.viewer.launch_passive(
         model=model,
         data=data,
-        show_left_ui=False,
-        show_right_ui=False,
+        show_left_ui=True,
+        show_right_ui=True,
         key_callback=key_callback,
     ) as viewer:
         # Reset the simulation.
@@ -446,7 +446,7 @@ def main() -> None:
         viewer.opt.frame = mujoco.mjtFrame.mjFRAME_SITE
         
         # 初始化目标位置和姿态
-        initial_target_pos = np.array([0.5, 0.0, 0.3])
+        initial_target_pos = np.array([0.8, 0.0, 0.3])
         data.mocap_pos[mocap_id] = initial_target_pos
         
         # 使用末端执行器的当前姿态作为初始目标
@@ -460,7 +460,7 @@ def main() -> None:
                 # ========== 1. 更新目标轨迹 (8字形) ==========
                 t = data.time
                 # 中心位置
-                center_pos = np.array([0.0, 0.4, 0.4])
+                center_pos = np.array([0.4, 0.0, 0.3])
                 # 8字形轨迹: y = A*sin(w*t), z = B*sin(2*w*t)
                 # 周期 T = 10s -> w = 2*pi/10 = 0.2*pi
                 w = 0.8 * np.pi
