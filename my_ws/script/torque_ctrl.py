@@ -20,6 +20,9 @@ import mujoco.viewer
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
 
+# 导入自定义控制器
+from Controller import ImpedanceController
+
 # Global visualization frequency (Hz), shared by control and visualization threads.
 VIS_FREQ = 50.0
 
@@ -47,11 +50,13 @@ class UDPLogger:
                     loop_id = self.latest[0]
                     if loop_id % self.send_every_n != 0:
                         continue
-                    x_curr_pos, x_des_pos, tau, q, dq, f_task = self.latest[1:]
+                    x_curr_pos, x_des_pos, x_curr_quat, x_des_quat, tau, q, dq, f_task = self.latest[1:]
 
                 data_dict = {
                     "pos_curr": {"x": float(x_curr_pos[0]), "y": float(x_curr_pos[1]), "z": float(x_curr_pos[2])},
                     "pos_des": {"x": float(x_des_pos[0]), "y": float(x_des_pos[1]), "z": float(x_des_pos[2])},
+                    "quat_curr": x_curr_quat.tolist(),
+                    "quat_des": x_des_quat.tolist(),
                     "target_torques": tau.tolist(),
                     "q": q.tolist(),
                     "dq": dq.tolist(),
@@ -64,7 +69,7 @@ class UDPLogger:
             except Exception as e:
                 print(f"[WARN] UDP send failed: {e}")
 
-    def update(self, loop_id, x_curr_pos, x_des_pos, tau, q, dq, f_task):
+    def update(self, loop_id, x_curr_pos, x_des_pos, x_curr_quat, x_des_quat, tau, q, dq, f_task):
         try:
             # Keep only the latest state and notify sender thread.
             with self.lock:
@@ -72,6 +77,8 @@ class UDPLogger:
                     int(loop_id),
                     np.array(x_curr_pos, copy=True),
                     np.array(x_des_pos, copy=True),
+                    np.array(x_curr_quat, copy=True),
+                    np.array(x_des_quat, copy=True),
                     np.array(tau, copy=True),
                     np.array(q, copy=True),
                     np.array(dq, copy=True),
@@ -119,6 +126,38 @@ def draw_trajectory(viewer, positions, color=[0, 1, 0, 1], width=0.002, clear=Fa
             to_pos
         )
         viewer.user_scn.ngeom += 1
+
+
+def build_quat_from_tangent(tangent, fallback_quat=None):
+    """Build a target quaternion whose x-axis follows the tangent direction."""
+    tangent = np.asarray(tangent, dtype=np.float64)
+    norm = np.linalg.norm(tangent)
+    if norm < 1e-8:
+        if fallback_quat is None:
+            return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        return np.array(fallback_quat, copy=True)
+
+    x_axis = tangent / norm
+    z_axis = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+    y_axis = np.cross(z_axis, x_axis)
+    y_norm = np.linalg.norm(y_axis)
+    if y_norm < 1e-8:
+        if fallback_quat is None:
+            return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        return np.array(fallback_quat, copy=True)
+
+    y_axis /= y_norm
+    z_axis = np.cross(x_axis, y_axis)
+    z_axis /= max(np.linalg.norm(z_axis), 1e-12)
+
+    rot = np.column_stack((x_axis, y_axis, z_axis))
+    quat = np.zeros(4)
+    mujoco.mju_mat2Quat(quat, rot.flatten())
+
+    # Keep the quaternion on the same hemisphere to avoid sign flips.
+    if quat[0] < 0:
+        quat *= -1.0
+    return quat
 
 class VisualizationWorker:
     def __init__(self, xml_path, render_hz=VIS_FREQ):
@@ -194,23 +233,6 @@ def parse_args():
     parser.add_argument("--init-pos", default="config/init_pos.txt", help="Initial joint positions file")
     return parser.parse_args()
 
-def rotation_error(R_d, R):
-    """Compute the orientation error between two rotation matrices using quaternions."""
-    q_d = np.zeros(4)
-    q = np.zeros(4)
-    mujoco.mju_mat2Quat(q_d, R_d.flatten())
-    mujoco.mju_mat2Quat(q, R.flatten())
-    
-    q_inv = np.zeros(4)
-    mujoco.mju_negQuat(q_inv, q)
-    
-    q_err = np.zeros(4)
-    mujoco.mju_mulQuat(q_err, q_d, q_inv)
-    
-    res = np.zeros(3)
-    mujoco.mju_quat2Vel(res, q_err, 1.0)
-    return res
-
 def main():
     args = parse_args()
     
@@ -230,8 +252,10 @@ def main():
         raise ValueError("control_dt must be > 0")
 
     torque_limits = np.array(ctrl_cfg['safety']['torque_limits'])
+    vel_limits = np.array(ctrl_cfg['safety'].get('vel_limits'))
+    target_inertia = np.array(ctrl_cfg['impedance_controller'].get('target_inertia', [1.0]*6))
 
-    xml_path = Path("script/universal_robots_ur5e/scene_torque.xml")
+    xml_path = Path("script/ur5e_gripper/scene.xml")
     if not xml_path.exists():
         xml_path = Path("script/universal_robots_ur5e/scene.xml")
     
@@ -269,7 +293,8 @@ def main():
     mujoco.mj_forward(model, data)
     
     x_des_pos_init = data.site_xpos[ee_site_id].copy()
-    x_des_rot = data.site_xmat[ee_site_id].reshape(3, 3).copy()
+    x_des_quat_init = np.zeros(4)
+    mujoco.mju_mat2Quat(x_des_quat_init, data.site_xmat[ee_site_id].flatten())
 
     trajectory_points = []
     target_trajectory = []
@@ -278,6 +303,11 @@ def main():
 
     logger = UDPLogger("127.0.0.1", 9870, send_every_n=5)
     visualizer = VisualizationWorker(xml_path, render_hz=VIS_FREQ)
+    
+    # 初始化封装后的控制器对象，在此处传入参数
+    controller = ImpedanceController(model, stiffness, damping, target_inertia, vel_limits)
+    
+    start_time = time.perf_counter()
 
     total_loop_count = 0
     freq_loop_count = 0
@@ -287,6 +317,7 @@ def main():
     next_vis_update = time.perf_counter()
     traj_sample_period = 0.05  # 20 Hz trajectory point sampling
     next_traj_sample = 0.0
+    traj_started = False
 
     try:
         while True:
@@ -295,16 +326,30 @@ def main():
                 break
 
             t_now = time.perf_counter() - start_time
-                
-            x_des_pos = x_des_pos_init.copy()
-            x_des_pos[0] += circle_radius * (np.cos(circle_omega * t_now) - 1.0)
-            x_des_pos[1] += circle_radius * np.sin(circle_omega * t_now)
-                
-            v_des_pos = np.array([
-                -circle_radius * circle_omega * np.sin(circle_omega * t_now),
-                 circle_radius * circle_omega * np.cos(circle_omega * t_now),
-                 0.0
-            ])
+
+            # 初始化阶段保持目标不动，等稳定后再开始更新轨迹
+            if t_now <= 2.0:
+                x_des_pos = x_des_pos_init.copy()
+                x_des_quat = x_des_quat_init.copy()
+                v_des_pos = np.zeros(3)
+            else:
+                if not traj_started:
+                    traj_started = True
+                    x_des_pos_init = data.site_xpos[ee_site_id].copy()
+
+                t_traj = t_now - 2.0
+                x_des_pos = x_des_pos_init.copy()
+                x_des_pos[0] += circle_radius * (np.cos(circle_omega * t_traj) - 1.0)
+                x_des_pos[1] += circle_radius * np.sin(circle_omega * t_traj)
+
+                # 固定目标姿态：保持启动时的末端姿态不变
+                x_des_quat = x_des_quat_init.copy()
+
+                v_des_pos = np.array([
+                    -circle_radius * circle_omega * np.sin(circle_omega * t_traj),
+                     circle_radius * circle_omega * np.cos(circle_omega * t_traj),
+                     0.0
+                ])
 
             q = rtde_r.getActualQ()
             dq = rtde_r.getActualQd()
@@ -320,21 +365,29 @@ def main():
                 
             v_ee = J @ dq
             x_curr_pos = data.site_xpos[ee_site_id]
-            x_curr_rot = data.site_xmat[ee_site_id].reshape(3, 3)
                 
-            pos_err = x_des_pos - x_curr_pos
-            rot_err = rotation_error(x_des_rot, x_curr_rot)
-            err = np.concatenate([pos_err, rot_err])
-            v_err = np.concatenate([v_des_pos, np.zeros(3)]) - v_ee
+            # v_des = np.concatenate([v_des_pos, np.zeros(3)])
+            v_des = np.zeros(6)
 
-            F_task = stiffness * err + damping * v_err
-            tau = J.T @ F_task
+
+            # 使用封装后的控制器计算关节力矩
+            tau = controller.compute_torque(
+                data, ee_site_id, 
+                x_des_pos, x_des_quat, v_ee, v_des
+            )
             tau = np.clip(tau, -torque_limits, torque_limits)
-                
-            ok = rtde_c.directTorque(tau.tolist(), True)
-            if not ok:
-                print("[ERROR] directTorque failed")
-                break
+
+            # 最终安全限幅
+            x_curr_quat = np.zeros(4)
+            mujoco.mju_mat2Quat(x_curr_quat, data.site_xmat[ee_site_id].flatten())
+
+
+            # 需要等仿真稳定后再发送力矩
+            if t_now > 2.0:
+                ok = rtde_c.directTorque(tau.tolist(), True)
+                if not ok:
+                    print("[ERROR] directTorque failed")
+                    break
                         
             if (not trajectory_points) or (t_now >= next_traj_sample):
                 trajectory_points.append(x_curr_pos.copy())
@@ -345,7 +398,7 @@ def main():
                 next_traj_sample = t_now + traj_sample_period
 
             total_loop_count += 1
-            logger.update(total_loop_count, x_curr_pos, x_des_pos, tau, q, dq, F_task)
+            logger.update(total_loop_count, x_curr_pos, x_des_pos, x_curr_quat, x_des_quat, tau, q, dq, controller.F_task)
 
             now_for_vis = time.perf_counter()
             if now_for_vis >= next_vis_update:

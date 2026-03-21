@@ -1,26 +1,22 @@
 # 控制参数配置文件
 
-# 阻抗控制器配置
+# 阻抗/PD 控制器共有配置 (刚度 K 和 阻尼 D)
 impedance_controller:
   # 平移刚度 (N/m), 旋转刚度 (Nm/rad)
-  stiffness: [1000.0, 1000.0, 1000.0, 100.0, 100.0, 100.0]
-  # 阻尼比
+  stiffness: [3000.0, 3000.0, 3000.0, 20000.0, 20000.0, 20000.0]
+  # 阻尼比 (用于计算 D = 2 * zeta * sqrt(K))
   damping_ratio: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
-
-# 后续扩展占位 (暂未实现)
-# pd_controller:
-#   kp: [100, 100, 100, 10, 10, 10]
-#   kd: [10, 10, 10, 1, 1, 1]
-
-# smc_controller:
-#   lambda: 1.0
-#   k: 0.5
+  # 阻抗控制器的目标质量阵对角元 (kg, kg*m^2)
+  target_inertia: [1.0, 1.0, 1.0, 5.0, 5.0, 5.0]
 
 # 通用控制器设置
 safety:
   torque_limits: [20.0, 20.0, 20.0, 10.0, 10.0, 10.0]
+  # 末端速度限制 [vx, vy, vz, wx, wy, wz]
+  # 单位: m/s (平移), rad/s (旋转)
+  vel_limits: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 trajectory:
-  circle_radius: 0.1
+  circle_radius: 0.15
   circle_omega: 0.8
   control_dt: 0.002
