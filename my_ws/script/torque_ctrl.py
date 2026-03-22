@@ -65,6 +65,23 @@ def get_traj(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_
     return x_des_pos, x_des_quat
 
 
+def slerp(q1, q2, alpha):
+    """Quaternion spherical linear interpolation."""
+    dot = np.dot(q1, q2)
+    if dot < 0.0:
+        q2 = -q2
+        dot = -dot
+    if dot > 0.9995:
+        res = q1 + alpha * (q2 - q1)
+        return res / np.linalg.norm(res)
+    theta_0 = np.arccos(np.clip(dot, -1.0, 1.0))
+    sin_theta_0 = np.sin(theta_0)
+    theta_t = theta_0 * alpha
+    s0 = np.sin(theta_0 - theta_t) / sin_theta_0
+    s1 = np.sin(theta_t) / sin_theta_0
+    return (s0 * q1) + (s1 * q2)
+
+
 class UDPLogger:
     def __init__(self, ip="127.0.0.1", port=9870, send_every_n=5):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -351,7 +368,7 @@ def main():
     # 0-2s: Stabilization (no torque)
     # 2-5s: Move to init_pos.txt pose
     # 5s+: Track trajectory
-    STABILIZE_END = 2.0
+    STABILIZE_END = 1.0
     RESET_END = 5.0
 
     try:
@@ -383,22 +400,30 @@ def main():
             # Define desired state based on time phases
             if t_now <= STABILIZE_END:
                 # Phase 1: Stabilization - no control torque will be sent
-                x_des_pos = x_des_pos_init.copy()
-                x_des_quat = x_des_quat_init.copy()
+                # Record the very first actual pose to start interpolation later
+                x_des_pos_start = x_curr_pos.copy()
+                x_des_quat_start = x_curr_quat.copy()
+                
+                x_des_pos = x_curr_pos.copy()
+                x_des_quat = x_curr_quat.copy()
                 v_des = np.zeros(6)
             elif t_now <= RESET_END:
-                # Phase 2: Reset to init_pos.txt. 
-                # x_des_pos_init and x_des_quat_init were computed from loading init_pos.txt earlier.
-                x_des_pos = x_des_pos_init.copy()
-                x_des_quat = x_des_quat_init.copy()
+                # Phase 2: Smooth linear interpolation to init_pos target
+                # Complete the interpolation 1 second before RESET_END
+                RESET_BUFFER = 1.0
+                alpha = (t_now - STABILIZE_END) / (RESET_END - STABILIZE_END - RESET_BUFFER)
+                alpha = np.clip(alpha, 0.0, 1.0)
+                
+                # Position linear interpolation
+                x_des_pos = (1.0 - alpha) * x_des_pos_start + alpha * x_des_pos_init
+                # Orientation SLERP
+                x_des_quat = slerp(x_des_quat_start, x_des_quat_init, alpha)
                 v_des = np.zeros(6)
             else:
                 # Phase 3: Trajectory tracking
                 if not traj_started:
                     traj_started = True
-                    # We no longer re-sync to actual pose here to honor init_pos.txt theoretical target.
-                    # x_des_pos_init remains the pose calculated from file at startup.
-
+                
                 t_traj = t_now - RESET_END
                 x_des_pos, x_des_quat = get_traj(t_traj, x_des_pos_init, circle_radius, circle_omega)
                 v_des = np.zeros(6)
