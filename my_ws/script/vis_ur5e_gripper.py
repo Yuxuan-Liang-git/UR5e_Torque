@@ -6,6 +6,7 @@ import mujoco.viewer
 import numpy as np
 import time
 import threading
+from pathlib import Path
 from collections import deque
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
@@ -355,8 +356,10 @@ def main() -> None:
 
     # Load the model and data (使用力矩控制的模型)
     # model = mujoco.MjModel.from_xml_path("my_ws/script/universal_robots_ur5e/scene_torque.xml")
-
-    model = mujoco.MjModel.from_xml_path("my_ws/script/ur5e_gripper/scene.xml")
+    
+    _HERE = Path(__file__).parent
+    model_path = _HERE / "ur5e_gripper" / "scene.xml"
+    model = mujoco.MjModel.from_xml_path(str(model_path))
     data = mujoco.MjData(model)
 
     # Override the simulation timestep.

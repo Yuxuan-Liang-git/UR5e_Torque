@@ -3,11 +3,11 @@
 # 阻抗/PD 控制器共有配置 (刚度 K 和 阻尼 D)
 impedance_controller:
   # 平移刚度 (N/m), 旋转刚度 (Nm/rad)
-  stiffness: [2000.0, 2000.0, 2000.0, 40000.0, 40000.0, 80000.0]
+  stiffness: [2000.0, 2000.0, 2000.0, 10000.0, 10000.0, 20000.0]
   # 阻尼比 (用于计算 D = 2 * zeta * sqrt(K))
   damping_ratio: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
   # 阻抗控制器的目标质量阵对角元 (kg, kg*m^2)
-  target_inertia: [1.0, 1.0, 1.0, 10.0, 10.0, 10.0]
+  target_inertia: [1.0, 1.0, 1.0, 5.0, 5.0, 5.0]
 
 # 通用控制器设置
 safety:
@@ -17,6 +17,36 @@ safety:
   vel_limits: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 trajectory:
-  circle_radius: 0.08
+  circle_radius: 0.05
   circle_omega: 0.5
   control_dt: 0.002
+
+nmpc_controller:
+  rebuild: true
+  mjcf_path: script/ur5e_gripper/scene.xml
+  frame_name: attachment_site
+  json_file: acados_ocp_ur5e.json
+
+  horizon_steps: 30
+  horizon_time: 0.3
+
+  weight_pos: 2000.0
+  weight_ori: 500.0
+  weight_vel: 0.1
+  weight_tau: [0.001, 0.001, 0.001, 0.01, 0.01, 0.01]
+
+  terminal_pos_scale: 20.0
+  terminal_ori_scale: 20.0
+
+  torque_limits: [150.0, 150.0, 150.0, 28.0, 28.0, 28.0]
+
+  solver:
+    qp_solver: FULL_CONDENSING_HPIPM
+    hessian_approx: GAUSS_NEWTON
+    integrator_type: ERK
+    nlp_solver_type: SQP_RTI
+    print_level: 0
+    sim_method_num_stages: 4
+    sim_method_num_steps: 1
+    qp_solver_iter_max: 50
+    regularize_method: MIRROR
