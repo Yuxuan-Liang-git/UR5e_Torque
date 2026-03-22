@@ -26,6 +26,45 @@ from Controller import ImpedanceController
 # Global visualization frequency (Hz), shared by control and visualization threads.
 VIS_FREQ = 50.0
 
+
+def get_traj_pos(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> np.ndarray:
+    # x_des_pos = np.array(x_des_pos_init, copy=True)
+    x_des_pos = x_des_pos_init + np.array([
+        2.0 * circle_radius * np.sin(circle_omega * t),
+        1.0 * circle_radius * np.sin(2 * circle_omega * t),
+        0.0,
+    ])
+    return x_des_pos
+
+
+def get_target_ori(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float, dt: float = 1e-3) -> np.ndarray:
+    """Tangent-aligned rotation matrix from trajectory finite difference."""
+    p0 = get_traj_pos(t, x_des_pos_init, circle_radius, circle_omega)
+    p1 = get_traj_pos(t + dt, x_des_pos_init, circle_radius, circle_omega)
+    tangent = p1 - p0
+    norm = np.linalg.norm(tangent)
+    if norm < 1e-6:
+        return np.eye(3)
+    tangent /= norm
+    z_axis = np.array([0.0, 0.0, -1.0])
+    y_axis = np.cross(z_axis, tangent)
+    y_norm = np.linalg.norm(y_axis)
+    y_axis = y_axis / y_norm if y_norm > 1e-6 else np.array([0.0, 1.0, 0.0])
+    z_axis = np.cross(tangent, y_axis)
+    return np.column_stack([tangent, y_axis, z_axis])
+
+
+def get_traj(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> tuple[np.ndarray, np.ndarray]:
+    """Return desired end-effector position and quaternion for time t."""
+    x_des_pos = get_traj_pos(t, x_des_pos_init, circle_radius, circle_omega)
+    x_des_mat = get_target_ori(t, x_des_pos_init, circle_radius, circle_omega)
+    x_des_quat = np.zeros(4)
+    mujoco.mju_mat2Quat(x_des_quat, x_des_mat.flatten())
+    if x_des_quat[0] < 0:
+        x_des_quat *= -1.0
+    return x_des_pos, x_des_quat
+
+
 class UDPLogger:
     def __init__(self, ip="127.0.0.1", port=9870, send_every_n=5):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -99,72 +138,16 @@ class UDPLogger:
         if self.thread.is_alive():
             self.thread.join(timeout=1.0)
 
-def draw_trajectory(viewer, positions, color=[0, 1, 0, 1], width=0.002, clear=False):
-    """Render trajectory segments in MuJoCo viewer."""
-    if clear:
-        viewer.user_scn.ngeom = 0
-
-    for i in range(len(positions) - 1):
-        if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
-            break
-        from_pos = np.array(positions[i][:3], dtype=np.float64)
-        to_pos = np.array(positions[i + 1][:3], dtype=np.float64)
-        
-        mujoco.mjv_initGeom(
-            viewer.user_scn.geoms[viewer.user_scn.ngeom],
-            mujoco.mjtGeom.mjGEOM_LINE,
-            [width, 0, 0],
-            from_pos,
-            np.eye(3).flatten(),
-            color
-        )
-        mujoco.mjv_connector(
-            viewer.user_scn.geoms[viewer.user_scn.ngeom],
-            mujoco.mjtGeom.mjGEOM_LINE,
-            width,
-            from_pos,
-            to_pos
-        )
-        viewer.user_scn.ngeom += 1
-
-
-def build_quat_from_tangent(tangent, fallback_quat=None):
-    """Build a target quaternion whose x-axis follows the tangent direction."""
-    tangent = np.asarray(tangent, dtype=np.float64)
-    norm = np.linalg.norm(tangent)
-    if norm < 1e-8:
-        if fallback_quat is None:
-            return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-        return np.array(fallback_quat, copy=True)
-
-    x_axis = tangent / norm
-    z_axis = np.array([0.0, 0.0, -1.0], dtype=np.float64)
-    y_axis = np.cross(z_axis, x_axis)
-    y_norm = np.linalg.norm(y_axis)
-    if y_norm < 1e-8:
-        if fallback_quat is None:
-            return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-        return np.array(fallback_quat, copy=True)
-
-    y_axis /= y_norm
-    z_axis = np.cross(x_axis, y_axis)
-    z_axis /= max(np.linalg.norm(z_axis), 1e-12)
-
-    rot = np.column_stack((x_axis, y_axis, z_axis))
-    quat = np.zeros(4)
-    mujoco.mju_mat2Quat(quat, rot.flatten())
-
-    # Keep the quaternion on the same hemisphere to avoid sign flips.
-    if quat[0] < 0:
-        quat *= -1.0
-    return quat
 
 class VisualizationWorker:
     def __init__(self, xml_path, render_hz=VIS_FREQ):
         self.model = mujoco.MjModel.from_xml_path(str(xml_path))
         self.data = mujoco.MjData(self.model)
         self.lock = threading.Lock()
+        self.target_mocap_id = self.model.body("target").mocapid[0]
         self.latest_q = None
+        self.latest_x_des_pos = None
+        self.latest_x_des_mat = None
         self.trajectory_points = []
         self.target_trajectory = []
         self.running = True
@@ -178,6 +161,8 @@ class VisualizationWorker:
                 viewer.cam.distance = 1.5
                 viewer.cam.azimuth = 90
                 viewer.cam.elevation = -25
+                viewer.opt.frame = mujoco.mjtFrame.mjFRAME_SITE
+                viewer.opt.sitegroup[:] = True
 
                 next_render = time.perf_counter()
                 while self.running and viewer.is_running():
@@ -188,6 +173,8 @@ class VisualizationWorker:
 
                     with self.lock:
                         q = None if self.latest_q is None else self.latest_q.copy()
+                        x_des_pos = None if self.latest_x_des_pos is None else self.latest_x_des_pos.copy()
+                        x_des_mat = None if self.latest_x_des_mat is None else self.latest_x_des_mat.copy()
                         traj = list(self.trajectory_points)
                         target_traj = list(self.target_trajectory)
 
@@ -196,9 +183,17 @@ class VisualizationWorker:
                     with viewer.lock():
                         if q is not None:
                             self.data.qpos[:6] = q
+                            if x_des_pos is not None:
+                                self.data.mocap_pos[self.target_mocap_id] = x_des_pos
+                            if x_des_mat is not None:
+                                x_des_quat = np.zeros(4)
+                                mujoco.mju_mat2Quat(x_des_quat, np.asarray(x_des_mat, dtype=np.float64).reshape(3, 3).flatten())
+                                if x_des_quat[0] < 0:
+                                    x_des_quat *= -1.0
+                                self.data.mocap_quat[self.target_mocap_id] = x_des_quat
                             mujoco.mj_forward(self.model, self.data)
-                            draw_trajectory(viewer, target_traj, color=[0, 1, 0, 1], clear=True, width=0.004)
-                            draw_trajectory(viewer, traj, color=[1, 0, 0, 1], width=0.004)
+                            self._draw_trajectory(viewer, target_traj, color=[0, 1, 0, 1], clear=True, width=0.004)
+                            self._draw_trajectory(viewer, traj, color=[1, 0, 0, 1], width=0.004)
                         else:
                             viewer.user_scn.ngeom = 0
                         viewer.sync()
@@ -211,11 +206,42 @@ class VisualizationWorker:
         finally:
             self.running = False
 
-    def update(self, q, trajectory_points, target_trajectory):
+    def update(self, q, trajectory_points, target_trajectory, x_des_pos=None, x_des_mat=None):
         with self.lock:
             self.latest_q = np.array(q, copy=True)
+            self.latest_x_des_pos = None if x_des_pos is None else np.array(x_des_pos, copy=True)
+            self.latest_x_des_mat = None if x_des_mat is None else np.array(x_des_mat, copy=True)
             self.trajectory_points = [np.array(p, copy=True) for p in trajectory_points]
             self.target_trajectory = [np.array(p, copy=True) for p in target_trajectory]
+
+    def _draw_trajectory(self, viewer, positions, color=[0, 1, 0, 1], width=0.002, clear=False):
+        """Render trajectory segments in MuJoCo viewer."""
+        if clear:
+            viewer.user_scn.ngeom = 0
+
+        for i in range(len(positions) - 1):
+            if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+                break
+            from_pos = np.array(positions[i][:3], dtype=np.float64)
+            to_pos = np.array(positions[i + 1][:3], dtype=np.float64)
+
+            mujoco.mjv_initGeom(
+                viewer.user_scn.geoms[viewer.user_scn.ngeom],
+                mujoco.mjtGeom.mjGEOM_LINE,
+                [width, 0, 0],
+                from_pos,
+                np.eye(3).flatten(),
+                color
+            )
+            mujoco.mjv_connector(
+                viewer.user_scn.geoms[viewer.user_scn.ngeom],
+                mujoco.mjtGeom.mjGEOM_LINE,
+                width,
+                from_pos,
+                to_pos
+            )
+            viewer.user_scn.ngeom += 1
+
 
     def is_running(self):
         return self.running
@@ -270,7 +296,9 @@ def main():
     rtde_r = RTDEReceiveInterface(args.robot_ip)
 
     q_init = None
-    init_pos_path = Path(args.init_pos)
+    init_pos_path = Path("ur_client_library/init_pos.txt")
+    if not init_pos_path.exists():
+        init_pos_path = Path(args.init_pos)
     if init_pos_path.exists():
         try:
             with open(init_pos_path, 'r') as f:
@@ -318,6 +346,13 @@ def main():
     traj_sample_period = 0.05  # 20 Hz trajectory point sampling
     next_traj_sample = 0.0
     traj_started = False
+    
+    # Timing logic:
+    # 0-2s: Stabilization (no torque)
+    # 2-5s: Move to init_pos.txt pose
+    # 5s+: Track trajectory
+    STABILIZE_END = 2.0
+    RESET_END = 5.0
 
     try:
         while True:
@@ -326,30 +361,6 @@ def main():
                 break
 
             t_now = time.perf_counter() - start_time
-
-            # 初始化阶段保持目标不动，等稳定后再开始更新轨迹
-            if t_now <= 2.0:
-                x_des_pos = x_des_pos_init.copy()
-                x_des_quat = x_des_quat_init.copy()
-                v_des_pos = np.zeros(3)
-            else:
-                if not traj_started:
-                    traj_started = True
-                    x_des_pos_init = data.site_xpos[ee_site_id].copy()
-
-                t_traj = t_now - 2.0
-                x_des_pos = x_des_pos_init.copy()
-                x_des_pos[0] += circle_radius * (np.cos(circle_omega * t_traj) - 1.0)
-                x_des_pos[1] += circle_radius * np.sin(circle_omega * t_traj)
-
-                # 固定目标姿态：保持启动时的末端姿态不变
-                x_des_quat = x_des_quat_init.copy()
-
-                v_des_pos = np.array([
-                    -circle_radius * circle_omega * np.sin(circle_omega * t_traj),
-                     circle_radius * circle_omega * np.cos(circle_omega * t_traj),
-                     0.0
-                ])
 
             q = rtde_r.getActualQ()
             dq = rtde_r.getActualQd()
@@ -365,10 +376,36 @@ def main():
                 
             v_ee = J @ dq
             x_curr_pos = data.site_xpos[ee_site_id]
-                
-            # v_des = np.concatenate([v_des_pos, np.zeros(3)])
-            v_des = np.zeros(6)
+            x_curr_mat = data.site_xmat[ee_site_id].reshape(3, 3)
+            x_curr_quat = np.zeros(4)
+            mujoco.mju_mat2Quat(x_curr_quat, data.site_xmat[ee_site_id].flatten())
 
+            # Define desired state based on time phases
+            if t_now <= STABILIZE_END:
+                # Phase 1: Stabilization - no control torque will be sent
+                x_des_pos = x_des_pos_init.copy()
+                x_des_quat = x_des_quat_init.copy()
+                v_des = np.zeros(6)
+            elif t_now <= RESET_END:
+                # Phase 2: Reset to init_pos.txt. 
+                # x_des_pos_init and x_des_quat_init were computed from loading init_pos.txt earlier.
+                x_des_pos = x_des_pos_init.copy()
+                x_des_quat = x_des_quat_init.copy()
+                v_des = np.zeros(6)
+            else:
+                # Phase 3: Trajectory tracking
+                if not traj_started:
+                    traj_started = True
+                    # We no longer re-sync to actual pose here to honor init_pos.txt theoretical target.
+                    # x_des_pos_init remains the pose calculated from file at startup.
+
+                t_traj = t_now - RESET_END
+                x_des_pos, x_des_quat = get_traj(t_traj, x_des_pos_init, circle_radius, circle_omega)
+                v_des = np.zeros(6)
+
+            x_des_mat = np.zeros(9)
+            mujoco.mju_quat2Mat(x_des_mat, x_des_quat)
+            x_des_mat = x_des_mat.reshape(3, 3)
 
             # 使用封装后的控制器计算关节力矩
             tau = controller.compute_torque(
@@ -377,13 +414,8 @@ def main():
             )
             tau = np.clip(tau, -torque_limits, torque_limits)
 
-            # 最终安全限幅
-            x_curr_quat = np.zeros(4)
-            mujoco.mju_mat2Quat(x_curr_quat, data.site_xmat[ee_site_id].flatten())
-
-
-            # 需要等仿真稳定后再发送力矩
-            if t_now > 2.0:
+            # Send torque only after stabilization phase
+            if t_now > STABILIZE_END:
                 ok = rtde_c.directTorque(tau.tolist(), True)
                 if not ok:
                     print("[ERROR] directTorque failed")
@@ -402,7 +434,7 @@ def main():
 
             now_for_vis = time.perf_counter()
             if now_for_vis >= next_vis_update:
-                visualizer.update(q, trajectory_points, target_trajectory)
+                visualizer.update(q, trajectory_points, target_trajectory, x_des_pos, x_des_mat)
                 next_vis_update += vis_period
                 if next_vis_update < now_for_vis:
                     next_vis_update = now_for_vis + vis_period

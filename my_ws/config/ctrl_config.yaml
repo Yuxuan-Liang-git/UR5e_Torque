@@ -17,6 +17,6 @@ safety:
   vel_limits: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 trajectory:
-  circle_radius: 0.15
-  circle_omega: 0.8
+  circle_radius: 0.05
+  circle_omega: 0.5
   control_dt: 0.002
