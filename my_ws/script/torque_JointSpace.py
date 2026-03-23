@@ -354,7 +354,7 @@ def main():
 
     pd_cfg = cfg.get("joint_pd", {})
     kp = np.array(pd_cfg.get("kp", [3000, 3000, 3000, 1000, 200, 15]), dtype=float)
-    kd = np.array(pd_cfg.get("kd", [100, 100, 100, 25, 10, 2]), dtype=float)
+    kd = np.array(pd_cfg.get("kd", [100, 100, 100, 20, 5, 1]), dtype=float)
     if kp.shape[0] != 6 or kd.shape[0] != 6:
         raise ValueError("joint_pd.kp and joint_pd.kd must both have 6 elements")
 
