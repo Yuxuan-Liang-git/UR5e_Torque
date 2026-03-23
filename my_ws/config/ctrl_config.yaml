@@ -1,28 +1,35 @@
 # 控制参数配置文件
 
-# 阻抗/PD 控制器共有配置 (刚度 K 和 阻尼 D)
+# 控制模式选择: "PD" 或 "Impedance"
+control_mode: "PD"
+
+# PD 控制器专用配置
+pd_controller:
+  stiffness: [3000.0, 3000.0, 3000.0, 25.0, 25.0, 25.0]
+  damping_ratio: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
+
 impedance_controller:
   # 平移刚度 (N/m), 旋转刚度 (Nm/rad)
-  stiffness: [2000.0, 2000.0, 2000.0, 10000.0, 10000.0, 20000.0]
-  # 阻尼比 (用于计算 D = 2 * zeta * sqrt(K))
-  damping_ratio: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
+  stiffness: [800.0, 800.0, 1000.0, 50.0, 50.0, 100.0]
+  # 阻尼比 (用于计算 D = 2 * zeta * sqrt(K * M))
+  damping_ratio: [0.6, 0.6, 0.6, 0.2, 0.2, 0.2]
   # 阻抗控制器的目标质量阵对角元 (kg, kg*m^2)
-  target_inertia: [1.0, 1.0, 1.0, 5.0, 5.0, 5.0]
+  target_inertia: [0.5, 0.5, 0.5, 0.3, 0.3, 0.3]
 
 # 通用控制器设置
 safety:
   torque_limits: [20.0, 20.0, 20.0, 10.0, 10.0, 10.0]
   # 末端速度限制 [vx, vy, vz, wx, wy, wz]
   # 单位: m/s (平移), rad/s (旋转)
-  vel_limits: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  vel_limits: [1.0, 1.0, 1.0, 5.0, 5.0, 5.0]
 
 trajectory:
-  circle_radius: 0.05
-  circle_omega: 0.5
-  control_dt: 0.002
+  circle_radius: 0.08
+  circle_omega: 0.8
+  control_dt: 0.01
 
 nmpc_controller:
-  rebuild: true
+  rebuild: false
   mjcf_path: script/ur5e_gripper/scene.xml
   frame_name: attachment_site
   json_file: acados_ocp_ur5e.json

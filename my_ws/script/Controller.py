@@ -69,7 +69,7 @@ class PDController(BaseController):
         # 3. 计算基本控制力
         err = np.concatenate([pos_err, rot_err])
         v_err = v_des - v_ee
-        self.F_task = self.stiffness * err + self.damping * v_err
+        self.F_task = self.stiffness @ err + self.damping @ v_err
 
         # 4. 速度限制逻辑
         if self.vel_limits is not None:
@@ -89,7 +89,7 @@ class PDController(BaseController):
 
         # 5. 投影到关节空间
         tau = J.T @ self.F_task
-        return tau
+        return np.asarray(tau).flatten()
 
 class ImpedanceController(BaseController):
     """
@@ -141,25 +141,27 @@ class ImpedanceController(BaseController):
         # 4. 阻抗行为 a_ref
         # 标准阻抗方程: M_m * dd_x + D * d_x + K * x = F_ext
         # 这里解算期望加速度 a_ref:
-        a_ref = self.M_m_inv @ (self.stiffness * err + self.damping * v_err)
+        a_ref = self.M_m_inv @ (self.stiffness @ err + self.damping @ v_err)
 
         # 5. 计算任务空间力 (这里由于 UR 自带重力补偿和摩擦补偿，我们主要关注惯性解耦)
         self.F_task = Lambda @ a_ref
 
-        # 6. 速度限制惩罚 (同 PD 控制器)
-        if self.vel_limits is not None:
-            v_trans = v_ee[:3]
-            v_max_trans = np.min(self.vel_limits[:3])
-            speed_trans = np.linalg.norm(v_trans)
-            if speed_trans > v_max_trans:
-                self.F_task[:3] -= 200.0 * (speed_trans - v_max_trans) * (v_trans / speed_trans)
+        # # 6. 速度限制惩罚 (同 PD 控制器)
+        # if self.vel_limits is not None:
+        #     v_trans = v_ee[:3]
+        #     v_max_trans = np.min(self.vel_limits[:3])
+        #     speed_trans = np.linalg.norm(v_trans)
+        #     if speed_trans > v_max_trans:
+        #         print(f"[WARN] Translational velocity limit exceeded: {speed_trans:.2f} > {v_max_trans:.2f}")
+        #         self.F_task[:3] -= 200.0 * (speed_trans - v_max_trans) * (v_trans / speed_trans)
             
-            v_rot = v_ee[3:]
-            v_max_rot = np.min(self.vel_limits[3:])
-            speed_rot = np.linalg.norm(v_rot)
-            if speed_rot > v_max_rot:
-                self.F_task[3:] -= 50.0 * (speed_rot - v_max_rot) * (v_rot / speed_rot)
+        #     v_rot = v_ee[3:]
+        #     v_max_rot = np.min(self.vel_limits[3:])
+        #     speed_rot = np.linalg.norm(v_rot)
+        #     if speed_rot > v_max_rot:
+        #         print(f"[WARN] Rotational velocity limit exceeded: {speed_rot:.2f} > {v_max_rot:.2f}")
+        #         self.F_task[3:] -= 50.0 * (speed_rot - v_max_rot) * (v_rot / speed_rot)
 
         # 7. 映射回关节力矩
         tau = J.T @ self.F_task
-        return tau
+        return np.asarray(tau).flatten()

@@ -21,7 +21,7 @@ from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
 
 # 导入自定义控制器
-from Controller import ImpedanceController
+from Controller import ImpedanceController, PDController
 
 # Global visualization frequency (Hz), shared by control and visualization threads.
 VIS_FREQ = 50.0
@@ -31,7 +31,7 @@ def get_traj_pos(t: float, x_des_pos_init: np.ndarray, circle_radius: float, cir
     # x_des_pos = np.array(x_des_pos_init, copy=True)
     x_des_pos = x_des_pos_init + np.array([
         2.0 * circle_radius * np.sin(circle_omega * t),
-        1.0 * circle_radius * np.sin(2 * circle_omega * t),
+        circle_radius * np.sin(2 * circle_omega * t),
         0.0,
     ])
     return x_des_pos
@@ -284,29 +284,53 @@ def main():
     with open(args.sys_config, 'r') as f:
         sys_cfg = yaml.safe_load(f)
 
-    stiffness = np.array(ctrl_cfg['impedance_controller']['stiffness'])
-    damping_ratio = np.array(ctrl_cfg['impedance_controller']['damping_ratio'])
-    damping = damping_ratio * 2 * np.sqrt(stiffness) 
+    # --- Controller selection logic ---
+    ctrl_mode = ctrl_cfg.get("control_mode", "Impedance")
+    
+    torque_limits = np.array(ctrl_cfg['safety']['torque_limits'])
+    vel_limits = np.array(ctrl_cfg['safety'].get('vel_limits'))
+
+    # Load shared model and site
+    xml_path = Path("script/ur5e_gripper/scene.xml")
+    if not xml_path.exists():
+        xml_path = Path("script/universal_robots_ur5e/scene.xml")
+    model = mujoco.MjModel.from_xml_path(str(xml_path))
+    data = mujoco.MjData(model)
+    ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
+    if ee_site_id == -1:
+        ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "eef_site")
+
+    if ctrl_mode == "PD":
+        pd_cfg = ctrl_cfg.get("pd_controller", {})
+        stiffness = np.diag(pd_cfg.get("stiffness", [100.0]*6))
+        damping_ratio = np.diag(pd_cfg.get('damping_ratio', [1.0]*6))
+        damping = damping_ratio * 2.0 * np.sqrt(stiffness)
+        active_controller = PDController(model, stiffness, damping, vel_limits)
+        print(f"[INFO] Using PD Controller")
+    else:
+        imp_cfg = ctrl_cfg.get("impedance_controller", {})
+        # Support both old and new config formats
+        if 'stiffness' in imp_cfg and isinstance(imp_cfg['stiffness'], list):
+            stiffness = np.diag(imp_cfg['stiffness'])
+            damping_ratio = np.diag(imp_cfg.get('damping_ratio', [1.0]*6))
+            target_inertia = np.diag(imp_cfg.get('inertia', [1.0]*6))
+            # Critical damping: D = 2 * zeta * sqrt(K * M)
+            damping = damping_ratio * 2.0 * np.sqrt(stiffness @ target_inertia)
+        else:
+            # Fallback for old simple list format if needed
+            target_inertia = np.array(imp_cfg.get('target_inertia', [1.0]*6))
+            stiffness = np.array(imp_cfg['stiffness'])
+            damping_ratio = np.array(imp_cfg['damping_ratio'])
+            damping = damping_ratio * 2 * np.sqrt(stiffness * target_inertia)
+        
+        active_controller = ImpedanceController(model, stiffness, damping, target_inertia, vel_limits)
+        print(f"[INFO] Using Impedance Controller")
 
     circle_radius = ctrl_cfg['trajectory']['circle_radius']
     circle_omega = ctrl_cfg['trajectory']['circle_omega']
     dt = float(ctrl_cfg['trajectory']['control_dt'])
     if dt <= 0.0:
         raise ValueError("control_dt must be > 0")
-
-    torque_limits = np.array(ctrl_cfg['safety']['torque_limits'])
-    vel_limits = np.array(ctrl_cfg['safety'].get('vel_limits'))
-    target_inertia = np.array(ctrl_cfg['impedance_controller'].get('target_inertia', [1.0]*6))
-
-    xml_path = Path("script/ur5e_gripper/scene.xml")
-    if not xml_path.exists():
-        xml_path = Path("script/universal_robots_ur5e/scene.xml")
-    
-    model = mujoco.MjModel.from_xml_path(str(xml_path))
-    data = mujoco.MjData(model)
-    ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
-    if ee_site_id == -1:
-        ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "eef_site")
 
     print(f"[INFO] Connecting to robot {args.robot_ip}")
     rtde_c = RTDEControlInterface(args.robot_ip)
@@ -348,9 +372,6 @@ def main():
 
     logger = UDPLogger("127.0.0.1", 9870, send_every_n=5)
     visualizer = VisualizationWorker(xml_path, render_hz=VIS_FREQ)
-    
-    # 初始化封装后的控制器对象，在此处传入参数
-    controller = ImpedanceController(model, stiffness, damping, target_inertia, vel_limits)
     
     start_time = time.perf_counter()
 
@@ -433,7 +454,7 @@ def main():
             x_des_mat = x_des_mat.reshape(3, 3)
 
             # 使用封装后的控制器计算关节力矩
-            tau = controller.compute_torque(
+            tau = active_controller.compute_torque(
                 data, ee_site_id, 
                 x_des_pos, x_des_quat, v_ee, v_des
             )
@@ -455,7 +476,7 @@ def main():
                 next_traj_sample = t_now + traj_sample_period
 
             total_loop_count += 1
-            logger.update(total_loop_count, x_curr_pos, x_des_pos, x_curr_quat, x_des_quat, tau, q, dq, controller.F_task)
+            logger.update(total_loop_count, x_curr_pos, x_des_pos, x_curr_quat, x_des_quat, tau, q, dq, active_controller.F_task)
 
             now_for_vis = time.perf_counter()
             if now_for_vis >= next_vis_update:
