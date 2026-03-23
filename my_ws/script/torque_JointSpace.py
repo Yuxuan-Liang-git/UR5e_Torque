@@ -156,16 +156,6 @@ def load_init_q(init_pos_path: Path):
         return None
 
 
-def align_joint_phase(q_target: np.ndarray, q_actual: np.ndarray) -> np.ndarray:
-    """Align target joints to nearest equivalent angle w.r.t. current joints."""
-    q_aligned = np.array(q_target, dtype=float, copy=True)
-    for i in range(6):
-        diff = q_actual[i] - q_aligned[i]
-        rotations = round(diff / (2.0 * np.pi))
-        q_aligned[i] = q_aligned[i] + rotations * (2.0 * np.pi)
-    return q_aligned
-
-
 class VisualizationWorker:
     def __init__(self, xml_path: Path, render_hz: float = VIS_FREQ):
         self.model = mujoco.MjModel.from_xml_path(str(xml_path))
@@ -363,8 +353,8 @@ def main():
     circle_omega = float(traj_cfg.get("circle_omega", 0.8))
 
     pd_cfg = cfg.get("joint_pd", {})
-    kp = np.array(pd_cfg.get("kp", [1000, 1000, 1000, 500, 200, 15]), dtype=float)
-    kd = np.array(pd_cfg.get("kd", [20, 20, 20, 10, 10, 1.5]), dtype=float)
+    kp = np.array(pd_cfg.get("kp", [3000, 3000, 3000, 1000, 200, 15]), dtype=float)
+    kd = np.array(pd_cfg.get("kd", [100, 100, 100, 25, 10, 2]), dtype=float)
     if kp.shape[0] != 6 or kd.shape[0] != 6:
         raise ValueError("joint_pd.kp and joint_pd.kd must both have 6 elements")
 
@@ -374,6 +364,7 @@ def main():
 
     model = mujoco.MjModel.from_xml_path(str(xml_path))
     data = mujoco.MjData(model)
+    data_plan = mujoco.MjData(model)
     ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
     if ee_site_id == -1:
         ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "eef_site")
@@ -396,8 +387,8 @@ def main():
     q_actual0 = np.array(rtde_r.getActualQ(), dtype=float)
 
     if q_init is not None:
-        q_target = align_joint_phase(q_init, q_actual0)
-        print(f"[INFO] Loaded and phase-aligned init joint position from {init_pos_path}")
+        q_target = q_init.copy()
+        print(f"[INFO] Loaded init joint position from {init_pos_path}")
     else:
         q_target = q_actual0.copy()
         print("[WARN] init_pos not found/invalid, holding current joints")
@@ -411,6 +402,7 @@ def main():
     STABILIZE_END = 1.0
     RESET_END = 5.0
     RESET_BUFFER = 1.0
+    q_start = None
 
     traj_started = False
     trajectory_points = []
@@ -450,17 +442,20 @@ def main():
                 x_des_mat = x_curr_mat.copy()
                 q_des = q.copy()
                 dq_des = np.zeros(6)
+                q_start = q.copy()
             elif t_now <= RESET_END:
                 alpha = (t_now - STABILIZE_END) / (RESET_END - STABILIZE_END - RESET_BUFFER)
                 alpha = np.clip(alpha, 0.0, 1.0)
 
-                x_des_pos = (1.0 - alpha) * x_des_pos_start + alpha * x_des_pos_init
-                x_des_quat = slerp(x_des_quat_start, x_des_quat_init, alpha)
-                x_des_mat = np.zeros(9)
-                mujoco.mju_quat2Mat(x_des_mat, x_des_quat)
-                x_des_mat = x_des_mat.reshape(3, 3)
-                q_des = map_task_target_to_joint(model, data, ee_site_id, x_des_pos, x_des_quat, q)
+                # Reset phase: directly track q_target in joint space.
+                q_des = (1.0 - alpha) * q_start + alpha * q_target
                 dq_des = np.zeros(6)
+
+                # Compute desired EE pose only for visualization/logging.
+                data_plan.qpos[:6] = q_des
+                mujoco.mj_forward(model, data_plan)
+                x_des_pos = data_plan.site_xpos[ee_site_id].copy()
+                x_des_mat = data_plan.site_xmat[ee_site_id].reshape(3, 3).copy()
             else:
                 if not traj_started:
                     traj_started = True
