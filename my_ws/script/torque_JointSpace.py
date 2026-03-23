@@ -239,6 +239,8 @@ def main():
     start_time = time.perf_counter()
     next_tick = time.perf_counter()
     total_loop_count = 0
+    freq_start_time = time.perf_counter()
+    freq_loop_count = 0
 
     try:
         while True:
@@ -314,6 +316,15 @@ def main():
 
             if visualizer is not None:
                 visualizer.update(q, trajectory_points, target_trajectory, x_des_pos, x_des_mat)
+
+            # Frequency printing
+            freq_loop_count += 1
+            if freq_loop_count >= 500:
+                now = time.perf_counter()
+                elapsed = now - freq_start_time
+                print(f"[INFO] Control Frequency: {freq_loop_count / elapsed:.2f} Hz")
+                freq_loop_count = 0
+                freq_start_time = now
 
             next_tick += dt
             sleep_time = next_tick - time.perf_counter()

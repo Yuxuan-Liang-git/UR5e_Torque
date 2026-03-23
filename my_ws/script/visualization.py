@@ -33,7 +33,9 @@ class VisualizationWorker:
 
     def _run(self):
         try:
-            with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
+            with mujoco.viewer.launch_passive(self.model, self.data,
+                show_left_ui=False, show_right_ui=False
+            ) as viewer:
                 viewer.cam.distance = 1.5
                 viewer.cam.azimuth = 90
                 viewer.cam.elevation = -25
