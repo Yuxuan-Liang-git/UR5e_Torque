@@ -10,18 +10,15 @@ Jacobian-based resolved-rate mapping, then tracked by joint-space PD.
 
 import argparse
 import time
-import threading
-import socket
-import json
-import queue
 from pathlib import Path
 
 import numpy as np
 import yaml
 import mujoco
-import mujoco.viewer
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
+from Controller import PDJointController
+from visualization import VisualizationWorker, UDPLogger
 
 
 VIS_FREQ = 50.0
@@ -156,185 +153,6 @@ def load_init_q(init_pos_path: Path):
         return None
 
 
-class VisualizationWorker:
-    def __init__(self, xml_path: Path, render_hz: float = VIS_FREQ):
-        self.model = mujoco.MjModel.from_xml_path(str(xml_path))
-        self.data = mujoco.MjData(self.model)
-        self.lock = threading.Lock()
-        try:
-            self.target_mocap_id = self.model.body("target").mocapid[0]
-        except Exception:
-            self.target_mocap_id = -1
-        self.latest_q = None
-        self.latest_x_des_pos = None
-        self.latest_x_des_mat = None
-        self.trajectory_points = []
-        self.target_trajectory = []
-        self.running = True
-        self.render_period = 1.0 / max(1.0, float(render_hz))
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
-
-    def _run(self):
-        try:
-            with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
-                viewer.cam.distance = 1.5
-                viewer.cam.azimuth = 90
-                viewer.cam.elevation = -25
-                viewer.opt.frame = mujoco.mjtFrame.mjFRAME_SITE
-                viewer.opt.sitegroup[:] = True
-
-                next_render = time.perf_counter()
-                while self.running and viewer.is_running():
-                    now = time.perf_counter()
-                    if now < next_render:
-                        time.sleep(min(0.002, next_render - now))
-                        continue
-
-                    with self.lock:
-                        q = None if self.latest_q is None else self.latest_q.copy()
-                        x_des_pos = None if self.latest_x_des_pos is None else self.latest_x_des_pos.copy()
-                        x_des_mat = None if self.latest_x_des_mat is None else self.latest_x_des_mat.copy()
-                        traj = list(self.trajectory_points)
-                        target_traj = list(self.target_trajectory)
-
-                    with viewer.lock():
-                        if q is not None:
-                            self.data.qpos[:6] = q
-                            if self.target_mocap_id >= 0 and x_des_pos is not None:
-                                self.data.mocap_pos[self.target_mocap_id] = x_des_pos
-                            if self.target_mocap_id >= 0 and x_des_mat is not None:
-                                x_des_quat = np.zeros(4)
-                                mujoco.mju_mat2Quat(
-                                    x_des_quat,
-                                    np.asarray(x_des_mat, dtype=np.float64).reshape(3, 3).flatten(),
-                                )
-                                if x_des_quat[0] < 0:
-                                    x_des_quat *= -1.0
-                                self.data.mocap_quat[self.target_mocap_id] = x_des_quat
-                            mujoco.mj_forward(self.model, self.data)
-                            self._draw_trajectory(viewer, target_traj, color=[0, 1, 0, 1], clear=True, width=0.004)
-                            self._draw_trajectory(viewer, traj, color=[1, 0, 0, 1], width=0.004)
-                        else:
-                            viewer.user_scn.ngeom = 0
-                        viewer.sync()
-
-                    next_render += self.render_period
-                    if next_render < now:
-                        next_render = now + self.render_period
-        except Exception as e:
-            print(f"[WARN] Visualization thread stopped: {e}")
-        finally:
-            self.running = False
-
-    def update(self, q, trajectory_points, target_trajectory, x_des_pos=None, x_des_mat=None):
-        with self.lock:
-            self.latest_q = np.array(q, copy=True)
-            self.latest_x_des_pos = None if x_des_pos is None else np.array(x_des_pos, copy=True)
-            self.latest_x_des_mat = None if x_des_mat is None else np.array(x_des_mat, copy=True)
-            self.trajectory_points = [np.array(p, copy=True) for p in trajectory_points]
-            self.target_trajectory = [np.array(p, copy=True) for p in target_trajectory]
-
-    def _draw_trajectory(self, viewer, positions, color=[0, 1, 0, 1], width=0.002, clear=False):
-        if clear:
-            viewer.user_scn.ngeom = 0
-
-        for i in range(len(positions) - 1):
-            if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
-                break
-            from_pos = np.array(positions[i][:3], dtype=np.float64)
-            to_pos = np.array(positions[i + 1][:3], dtype=np.float64)
-
-            mujoco.mjv_initGeom(
-                viewer.user_scn.geoms[viewer.user_scn.ngeom],
-                mujoco.mjtGeom.mjGEOM_LINE,
-                [width, 0, 0],
-                from_pos,
-                np.eye(3).flatten(),
-                color,
-            )
-            mujoco.mjv_connector(
-                viewer.user_scn.geoms[viewer.user_scn.ngeom],
-                mujoco.mjtGeom.mjGEOM_LINE,
-                width,
-                from_pos,
-                to_pos,
-            )
-            viewer.user_scn.ngeom += 1
-
-    def is_running(self):
-        return self.running
-
-    def stop(self):
-        self.running = False
-        if self.thread.is_alive():
-            self.thread.join(timeout=1.0)
-
-
-class UDPLogger:
-    def __init__(self, ip="127.0.0.1", port=9870, send_every_n=2):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.addr = (ip, int(port))
-        self.queue = queue.Queue(maxsize=1)
-        self.running = True
-        self.send_every_n = max(1, int(send_every_n))
-        self.latest = None
-        self.lock = threading.Lock()
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
-
-    def _run(self):
-        while self.running:
-            try:
-                self.queue.get(timeout=0.1)
-                with self.lock:
-                    if self.latest is None:
-                        continue
-                    loop_id = self.latest[0]
-                    if loop_id % self.send_every_n != 0:
-                        continue
-                    q_des, q, x_des_pos, x_curr_pos, tau = self.latest[1:]
-
-                payload = {
-                    "q_des": q_des.tolist(),
-                    "q": q.tolist(),
-                    "x_des_pos": x_des_pos.tolist(),
-                    "x_curr_pos": x_curr_pos.tolist(),
-                    "tau": tau.tolist(),
-                }
-                self.sock.sendto(json.dumps(payload).encode(), self.addr)
-            except queue.Empty:
-                continue
-            except Exception as e:
-                print(f"[WARN] UDP send failed: {e}")
-
-    def update(self, loop_id, q_des, q, x_des_pos, x_curr_pos, tau):
-        try:
-            with self.lock:
-                self.latest = (
-                    int(loop_id),
-                    np.array(q_des, copy=True),
-                    np.array(q, copy=True),
-                    np.array(x_des_pos, copy=True),
-                    np.array(x_curr_pos, copy=True),
-                    np.array(tau, copy=True),
-                )
-
-            if self.queue.full():
-                try:
-                    self.queue.get_nowait()
-                except queue.Empty:
-                    pass
-            self.queue.put_nowait(1)
-        except Exception:
-            pass
-
-    def stop(self):
-        self.running = False
-        if self.thread.is_alive():
-            self.thread.join(timeout=1.0)
-
-
 def main():
     args = parse_args()
 
@@ -352,9 +170,15 @@ def main():
     circle_radius = float(traj_cfg.get("circle_radius", 0.08))
     circle_omega = float(traj_cfg.get("circle_omega", 0.8))
 
-    pd_cfg = cfg.get("joint_pd", {})
-    kp = np.array(pd_cfg.get("kp", [3000, 3000, 3000, 1000, 200, 15]), dtype=float)
-    kd = np.array(pd_cfg.get("kd", [100, 100, 100, 20, 5, 1]), dtype=float)
+    pdjoint_cfg = cfg.get("pdjoint_controller")
+    if pdjoint_cfg is None:
+        raise ValueError("Missing 'joint_pd' section in ctrl_config.yaml")
+
+    if "kp" not in pdjoint_cfg or "kd" not in pdjoint_cfg:
+        raise ValueError("'joint_pd' must contain both 'kp' and 'kd'")
+
+    kp = np.array(pdjoint_cfg["kp"], dtype=float)
+    kd = np.array(pdjoint_cfg["kd"], dtype=float)
     if kp.shape[0] != 6 or kd.shape[0] != 6:
         raise ValueError("joint_pd.kp and joint_pd.kd must both have 6 elements")
 
@@ -365,6 +189,7 @@ def main():
     model = mujoco.MjModel.from_xml_path(str(xml_path))
     data = mujoco.MjData(model)
     data_plan = mujoco.MjData(model)
+    joint_controller = PDJointController(model=model, kp=kp, kd=kd, torque_limits=torque_limits)
     ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
     if ee_site_id == -1:
         ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "eef_site")
@@ -468,8 +293,7 @@ def main():
                 q_des = map_task_target_to_joint(model, data, ee_site_id, x_des_pos, x_des_quat, q)
                 dq_des = np.zeros(6)
 
-            tau = kp * (q_des - q) + kd * (dq_des - dq)
-            tau = np.clip(tau, -torque_limits, torque_limits)
+            tau = joint_controller.compute_torque(q_des, q, dq_des, dq)
 
             if t_now > STABILIZE_END:
                 ok = rtde_c.directTorque(tau.tolist(), True)

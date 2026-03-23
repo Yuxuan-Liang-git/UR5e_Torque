@@ -165,3 +165,24 @@ class ImpedanceController(BaseController):
         # 7. 映射回关节力矩
         tau = J.T @ self.F_task
         return np.asarray(tau).flatten()
+
+
+class PDJointController(BaseController):
+    """关节空间 PD 控制器: tau = Kp*(q_des-q) + Kd*(dq_des-dq)."""
+
+    def __init__(self, model, kp, kd, torque_limits=None):
+        super().__init__(model)
+        self.kp = np.array(kp, dtype=float)
+        self.kd = np.array(kd, dtype=float)
+        self.torque_limits = None if torque_limits is None else np.array(torque_limits, dtype=float)
+
+    def compute_torque(self, q_des, q, dq_des, dq):
+        q_des = np.asarray(q_des, dtype=float)
+        q = np.asarray(q, dtype=float)
+        dq_des = np.asarray(dq_des, dtype=float)
+        dq = np.asarray(dq, dtype=float)
+
+        tau = self.kp * (q_des - q) + self.kd * (dq_des - dq)
+        if self.torque_limits is not None:
+            tau = np.clip(tau, -self.torque_limits, self.torque_limits)
+        return np.asarray(tau).flatten()
