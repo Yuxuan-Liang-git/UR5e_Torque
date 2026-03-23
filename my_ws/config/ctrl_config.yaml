@@ -10,8 +10,8 @@ pd_controller:
 
 # 关节空间 PD 控制器参数 (torque_JointSpace.py)
 pdjoint_controller:
-  kp: [3000.0, 3000.0, 3000.0, 1000.0, 200.0, 10.0]
-  kd: [100.0, 100.0, 100.0, 15.0, 10.0, 1.0]
+  kp: [1000.0, 1000.0, 1000.0, 300.0, 150.0, 10.0]
+  kd: [40.0, 40.0, 40.0, 10.0, 10.0, 1.0]
 
 impedance_controller:
   # 平移刚度 (N/m), 旋转刚度 (Nm/rad)
@@ -31,7 +31,7 @@ safety:
 trajectory:
   circle_radius: 0.08
   circle_omega: 0.8
-  control_dt: 0.01
+  control_dt: 0.02
 
 nmpc_controller:
   rebuild: false
@@ -39,18 +39,18 @@ nmpc_controller:
   frame_name: attachment_site
   json_file: acados_ocp_ur5e.json
 
-  horizon_steps: 30
+  horizon_steps: 15
   horizon_time: 0.3
 
-  weight_pos: 2000.0
-  weight_ori: 500.0
-  weight_vel: 0.1
-  weight_tau: [0.001, 0.001, 0.001, 0.01, 0.01, 0.01]
+  weight_pos: [200.0, 200.0, 200.0]
+  weight_ori: [50.0, 50.0, 50.0]
+  weight_vel: 0.2
+  weight_tau: [0.1, 0.1, 0.1, 0.01, 0.01, 0.01]
 
-  terminal_pos_scale: 20.0
-  terminal_ori_scale: 20.0
+  terminal_pos_scale: 10.0
+  terminal_ori_scale: 10.0
 
-  torque_limits: [150.0, 150.0, 150.0, 28.0, 28.0, 28.0]
+  torque_limits: [20.0, 20.0, 20.0, 10.0, 10.0, 10.0]
 
   solver:
     qp_solver: FULL_CONDENSING_HPIPM
