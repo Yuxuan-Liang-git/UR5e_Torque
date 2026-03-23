@@ -11,7 +11,7 @@ pd_controller:
 # 关节空间 PD 控制器参数 (torque_JointSpace.py)
 pdjoint_controller:
   kp: [3000.0, 3000.0, 3000.0, 1000.0, 200.0, 10.0]
-  kd: [100.0, 100.0, 100.0, 15.0, 4.0, 1.0]
+  kd: [100.0, 100.0, 100.0, 15.0, 10.0, 1.0]
 
 impedance_controller:
   # 平移刚度 (N/m), 旋转刚度 (Nm/rad)
