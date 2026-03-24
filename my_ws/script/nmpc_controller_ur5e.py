@@ -137,7 +137,8 @@ class UR5eNMPC:
             ocp.constraints.idxbu = np.arange(self.nu)
             ocp.constraints.x0    = np.zeros(self.nx)
 
-            ocp.solver_options.qp_solver               = "FULL_CONDENSING_HPIPM"
+            # 更多鲁棒的求解器选项
+            ocp.solver_options.qp_solver               = "PARTIAL_CONDENSING_HPIPM"
             ocp.solver_options.hessian_approx          = "GAUSS_NEWTON"
             ocp.solver_options.integrator_type         = "ERK"
             ocp.solver_options.nlp_solver_type         = "SQP_RTI"
@@ -145,8 +146,12 @@ class UR5eNMPC:
             ocp.solver_options.tf                      = Tf
             ocp.solver_options.sim_method_num_stages   = 4
             ocp.solver_options.sim_method_num_steps    = 1
-            ocp.solver_options.qp_solver_iter_max      = 50
-            ocp.solver_options.regularize_method       = "MIRROR"
+            ocp.solver_options.qp_solver_iter_max      = 100
+            ocp.solver_options.qp_solver_cond_N        = 5 # 针对 N=15 开启部分凝聚
+            ocp.solver_options.regularize_method       = "CONVEXIFY"
+            ocp.solver_options.levenberg_marquardt     = 1e-2 # 增加数值稳定性
+            ocp.solver_options.hpipm_mode              = "SPEED" # 或者 "ROBUST"如果仍然报错
+            ocp.solver_options.ext_cost_num_hess       = 0 # NONLINEAR_LS 下通常设为0
 
             # 删除旧产物，确保从零生成
             if os.path.exists(json_path):

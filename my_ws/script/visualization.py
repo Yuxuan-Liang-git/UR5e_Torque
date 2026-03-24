@@ -148,10 +148,7 @@ class UDPLogger:
                 with self.lock:
                     if self.latest is None:
                         continue
-                    loop_id = self.latest[0]
-                    if loop_id % self.send_every_n != 0:
-                        continue
-                    q_des, q, x_des_pos, x_curr_pos, tau = self.latest[1:]
+                    loop_id, q_des, q, x_des_pos, x_curr_pos, tau, extra = self.latest
 
                 payload = {
                     "q_des": q_des.tolist(),
@@ -160,13 +157,19 @@ class UDPLogger:
                     "x_curr_pos": x_curr_pos.tolist(),
                     "tau": tau.tolist(),
                 }
+                if extra:
+                    for k, v in extra.items():
+                        if isinstance(v, np.ndarray):
+                            payload[k] = v.tolist()
+                        else:
+                            payload[k] = v
                 self.sock.sendto(json.dumps(payload).encode(), self.addr)
             except queue.Empty:
                 continue
             except Exception as e:
                 print(f"[WARN] UDP send failed: {e}")
 
-    def update(self, loop_id, q_des, q, x_des_pos, x_curr_pos, tau):
+    def update(self, loop_id, q_des, q, x_des_pos, x_curr_pos, tau, extra=None):
         try:
             with self.lock:
                 self.latest = (
@@ -176,6 +179,7 @@ class UDPLogger:
                     np.array(x_des_pos, copy=True),
                     np.array(x_curr_pos, copy=True),
                     np.array(tau, copy=True),
+                    extra
                 )
 
             if self.queue.full():

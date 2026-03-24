@@ -9,6 +9,7 @@ import numpy as np
 import time
 import threading
 import math
+import yaml
 from collections import deque
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
@@ -16,21 +17,30 @@ from matplotlib.animation import FuncAnimation
 from nmpc_controller_ur5e import UR5eNMPC, mj2pin_pos, mj2pin_rot
 
 _HERE = Path(__file__).parent.parent
+_CONFIG_PATH = _HERE / "config" / "ctrl_config.yaml"
+
+# 加载配置文件
+with open(_CONFIG_PATH, "r") as f:
+    config = yaml.safe_load(f)
+
+nmpc_cfg = config["nmpc_controller"]
+
 # _XML  = _HERE /"script" / "universal_robots_ur5e" / "scene_torque.xml"
-_XML  = _HERE /"script" / "ur5e_gripper" / "scene.xml"
+_XML  = _HERE / nmpc_cfg["mjcf_path"]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # NMPC parameters
 # ═══════════════════════════════════════════════════════════════════════════════
-N   = 30         # prediction horizon steps
-Tf  = 0.3         # prediction horizon (s)  →  dt_mpc = 10 ms
-dt  = Tf / N      # control / simulation step  (s)
-REBUILD_SOLVER = False # True: 重新生成C代码; False: 直接加载已有solver
-SAVE_TRAJ = True
+N   = nmpc_cfg["horizon_steps"]   # prediction horizon steps
+Tf  = nmpc_cfg["horizon_time"]    # prediction horizon (s)
+dt  = nmpc_cfg.get("control_dt", Tf / N) # control / simulation step (s)
+REBUILD_SOLVER = nmpc_cfg["rebuild"] # True: 重新生成C代码; False: 直接加载已有solver
+SAVE_TRAJ = False
 
 # Trajectory (圆形轨迹)
-CIRCLE_RADIUS = 0.1
-CIRCLE_SPEED  = 0.4 * math.pi          # rad/s
+_TRAJ_CFG = config["trajectory"]
+CIRCLE_RADIUS = _TRAJ_CFG["circle_radius"]
+CIRCLE_SPEED  = _TRAJ_CFG["circle_omega"]
 CIRCLE_CENTER = np.array([0.0, 0.5, 0.4])
 
 # Plot window
@@ -109,12 +119,13 @@ def make_pause_toggle(state: dict):
 
 
 class RealtimePlotter:
-    def __init__(self, maxlen: int = 50000):
+    def __init__(self, maxlen: int = 100000):
         self.lock    = threading.Lock()
         self.running = False
         self.t_data  = deque(maxlen=maxlen)
         self.pos_err = [deque(maxlen=maxlen) for _ in range(3)]
         self.ori_err = [deque(maxlen=maxlen) for _ in range(3)]
+        self.torques = [deque(maxlen=maxlen) for _ in range(6)]
         self.jerk    = deque(maxlen=maxlen)
 
     def start(self):
@@ -124,37 +135,51 @@ class RealtimePlotter:
     def stop(self):
         self.running = False
 
-    def update(self, t, pos_err_3, ori_err_3, jerk_norm: float):
+    def update(self, t, pos_err_3, ori_err_3, torques_6, jerk_norm: float):
         with self.lock:
             self.t_data.append(t)
             for i in range(3):
                 self.pos_err[i].append(pos_err_3[i])
                 self.ori_err[i].append(ori_err_3[i])
+            for i in range(6):
+                self.torques[i].append(torques_6[i])
             self.jerk.append(jerk_norm)
 
     def _loop(self):
-        fig, (ax_p, ax_o, ax_j) = plt.subplots(3, 1, figsize=(11, 10))
+        fig, (ax_p, ax_o, ax_t, ax_j) = plt.subplots(4, 1, figsize=(11, 12))
         fig.suptitle("UR5e Acados NMPC — Real-time")
 
         ax_p.set_title("EE Position Error (m)")
         ax_p.set_xlabel("Time (s)"); ax_p.set_ylabel("Error (m)"); ax_p.grid(True)
         ax_o.set_title("EE Orientation Error (rad, axis-angle)")
         ax_o.set_xlabel("Time (s)"); ax_o.set_ylabel("Error (rad)"); ax_o.grid(True)
+        ax_t.set_title("Joint Torques (Nm)")
+        ax_t.set_xlabel("Time (s)"); ax_t.set_ylabel("Torque (Nm)"); ax_t.grid(True)
         ax_j.set_title("EE Jerk Magnitude (m/s³)")
         ax_j.set_xlabel("Time (s)"); ax_j.set_ylabel("|jerk| (m/s³)"); ax_j.grid(True)
 
         colors_xyz = ["r", "g", "b"]
         lines_pos = [ax_p.plot([], [], c, label=l, lw=1.5)[0] for c, l in zip(colors_xyz, ["X", "Y", "Z"])]
         lines_ori = [ax_o.plot([], [], c, label=l, lw=1.5)[0] for c, l in zip(colors_xyz, ["rx", "ry", "rz"])]
-        line_jerk, = ax_j.plot([], [], "m", lw=1.5, label="|jerk|")
-        ax_p.legend(ncol=3, fontsize=8); ax_o.legend(ncol=3, fontsize=8); ax_j.legend(fontsize=8)
+        
+        torque_labels = ["sh_pan", "sh_lift", "elbow", "w1", "w2", "w3"]
+        torque_colors = ["r", "g", "b", "c", "m", "y"]
+        lines_tau = [ax_t.plot([], [], torque_colors[i], label=torque_labels[i], lw=1.2)[0] for i in range(6)]
+        
+        line_jerk, = ax_j.plot([], [], "k", lw=1.5, label="|jerk|")
+        ax_p.legend(ncol=3, fontsize=8); ax_o.legend(ncol=3, fontsize=8)
+        ax_t.legend(ncol=3, fontsize=8); ax_j.legend(fontsize=8)
 
         def _set_ylim(ax, datasets, margin=0.1, min_span=1e-6):
+            if not datasets or not datasets[0][0]: return
             x0, x1 = ax.get_xlim()
             vals = []
             for xs, ys in datasets:
-                for xi, yi in zip(xs, ys):
-                    if x0 <= xi <= x1: vals.append(yi)
+                # 优化选择: 只看窗口内的数据
+                xs_arr, ys_arr = np.array(xs), np.array(ys)
+                mask = (xs_arr >= x0) & (xs_arr <= x1)
+                if np.any(mask):
+                    vals.extend(ys_arr[mask].tolist())
             if not vals: return
             lo, hi = min(vals), max(vals)
             span = max(hi - lo, min_span)
@@ -164,19 +189,28 @@ class RealtimePlotter:
             if not self.running: return all_lines
             with self.lock:
                 if not self.t_data: return all_lines
-                t, pe, oe, jk = list(self.t_data), [list(d) for d in self.pos_err], [list(d) for d in self.ori_err], list(self.jerk)
+                t = list(self.t_data)
+                pe = [list(d) for d in self.pos_err]
+                oe = [list(d) for d in self.ori_err]
+                tau = [list(d) for d in self.torques]
+                jk = list(self.jerk)
+
             cur = t[-1]
             x0 = max(0, cur - window_width)
-            for ax in (ax_p, ax_o, ax_j): ax.set_xlim(x0, cur + 0.5)
+            for ax in (ax_p, ax_o, ax_t, ax_j): ax.set_xlim(x0, cur + 0.5)
+            
             for i, ln in enumerate(lines_pos): ln.set_data(t, pe[i])
             for i, ln in enumerate(lines_ori): ln.set_data(t, oe[i])
+            for i, ln in enumerate(lines_tau): ln.set_data(t, tau[i])
             line_jerk.set_data(t, jk)
+
             _set_ylim(ax_p, [(t, pe[i]) for i in range(3)])
             _set_ylim(ax_o, [(t, oe[i]) for i in range(3)])
+            _set_ylim(ax_t, [(t, tau[i]) for i in range(6)])
             _set_ylim(ax_j, [(t, jk)])
             return all_lines
 
-        all_lines = lines_pos + lines_ori + [line_jerk]
+        all_lines = lines_pos + lines_ori + lines_tau + [line_jerk]
         anim = FuncAnimation(fig, animate, interval=100, blit=False)
         plt.tight_layout()
         plt.show()
@@ -280,7 +314,10 @@ def main():
 
                 u_opt = ctrl.solve(x0, ref_pos, ref_rot)
                 _solve_times.append(ctrl.time_tot)
-                u_opt = np.clip(u_opt, -np.array([150,150,150,28,28,28]), np.array([150,150,150,28,28,28]))
+                
+                # 限幅从配置文件读取
+                torque_lim = np.array(nmpc_cfg.get("torque_limits", [150, 150, 150, 28, 28, 28]))
+                u_opt = np.clip(u_opt, -torque_lim, torque_lim)
                 d.ctrl[actuator_ids] = u_opt
 
                 # ── 夹爪 PD 控制 ───────────────────────────────────────────────
@@ -323,7 +360,7 @@ def main():
                     jerk_norm = float(np.linalg.norm((acc1-acc0)/max(0.5*(t1-t0+t2-t1),1e-6)))
                 else: jerk_norm = 0.0
 
-                if plotter: plotter.update(t_traj, pos_err, ori_err, jerk_norm)
+                if plotter: plotter.update(t_traj, pos_err, ori_err, u_opt, jerk_norm)
                 _pos_norm, _ori_norm = float(np.linalg.norm(pos_err)), float(np.linalg.norm(ori_err))
                 data_log.append((t_traj, _pos_norm, _ori_norm, jerk_norm))
 

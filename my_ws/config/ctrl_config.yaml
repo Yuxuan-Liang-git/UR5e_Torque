@@ -42,15 +42,21 @@ nmpc_controller:
   horizon_steps: 15
   horizon_time: 0.3
 
-  weight_pos: [200.0, 200.0, 200.0]
-  weight_ori: [50.0, 50.0, 50.0]
-  weight_vel: 0.2
-  weight_tau: [0.1, 0.1, 0.1, 0.01, 0.01, 0.01]
+
+  # weight_pos: [2000.0, 2000.0, 2000.0]
+  # weight_ori: [500.0, 500.0, 500.0]
+  # weight_vel: 0.1
+  # weight_tau: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+
+  weight_pos: [1.0, 1.0, 1.0]
+  weight_ori: [1.0, 1.0, 1.0]
+  weight_vel: 0.1
+  weight_tau: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
   terminal_pos_scale: 10.0
   terminal_ori_scale: 10.0
 
-  torque_limits: [20.0, 20.0, 20.0, 10.0, 10.0, 10.0]
+  torque_limits: [50.0, 50.0, 50.0, 10.0, 10.0, 10.0]
 
   solver:
     qp_solver: FULL_CONDENSING_HPIPM

@@ -271,9 +271,9 @@ class VisualizationWorker:
 def parse_args():
     parser = argparse.ArgumentParser(description="UR5e Task Space Impedance Control")
     parser.add_argument("--robot-ip", default="192.168.56.101", help="UR robot IP")
-    parser.add_argument("--config", default="config/ctrl_config.yaml", help="Control config file")
-    parser.add_argument("--sys-config", default="config/sys_config.yaml", help="System config file")
-    parser.add_argument("--init-pos", default="config/init_pos.txt", help="Initial joint positions file")
+    parser.add_argument("--config", default="/home/amdt/ur_force_ws/my_ws/config/ctrl_config.yaml", help="Control config file")
+    parser.add_argument("--sys-config", default="/home/amdt/ur_force_ws/my_ws/config/sys_config.yaml", help="System config file")
+    parser.add_argument("--init-pos", default="/home/amdt/ur_force_ws/my_ws/config/init_pos.txt", help="Initial joint positions file")
     return parser.parse_args()
 
 def main():
