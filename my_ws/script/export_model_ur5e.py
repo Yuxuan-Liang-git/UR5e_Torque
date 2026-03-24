@@ -10,14 +10,16 @@ The dynamics are computed via the Articulated-Body Algorithm (ABA):
 """
 
 import sys
+sys.path = [p for p in sys.path if "/opt/ros" not in p and ".local" not in p]
+
 from pathlib import Path
 from acados_template import AcadosModel
 import casadi as ca
 import pinocchio as pin
 import pinocchio.casadi as cpin
 
-_HERE = Path(__file__).parent
-_MJCF = _HERE / "universal_robots_ur5e" / "ur5e.xml"
+_HERE = Path(__file__).parent.parent
+_MJCF = _HERE /"script" / "universal_robots_ur5e" / "ur5e.xml"
 
 
 def export_ur5e_model():

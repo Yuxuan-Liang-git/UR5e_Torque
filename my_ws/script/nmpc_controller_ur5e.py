@@ -18,6 +18,8 @@ cost type = NONLINEAR_LS and provide the residual expression via
 """
 
 import sys
+sys.path = [p for p in sys.path if "/opt/ros" not in p and ".local" not in p]
+
 from pathlib import Path
 import numpy as np
 import casadi as ca
@@ -54,29 +56,13 @@ class UR5eNMPC:
 
     def __init__(self, N: int = 30, Tf: float = 0.3,
                  json_file: str = "acados_ocp_ur5e.json",
-                 rebuild: bool = True,
-                 weight_pos: list = [500.0, 500.0, 500.0],
-                 weight_ori: list = [50.0, 50.0, 50.0],
-                 weight_vel: float = 0.1,
-                 weight_tau: list = [0.1, 0.1, 0.1, 0.01, 0.01, 0.01],
-                 terminal_pos_scale: float = 20.0,
-                 terminal_ori_scale: float = 20.0,
-                 torque_limits: list = [20.0, 20.0, 20.0, 10.0, 10.0, 10.0]):
+                 rebuild: bool = True):
 
         self.N  = N
         self.Tf = Tf
         self.dt = Tf / N
         self.ny   = 18
         self.ny_e = 6
-        
-        self.weight_pos = weight_pos
-        self.weight_ori = weight_ori
-        self.weight_vel = weight_vel
-        self.weight_tau = weight_tau
-        self.terminal_pos_scale = terminal_pos_scale
-        self.terminal_ori_scale = terminal_ori_scale
-        self.torque_limits = torque_limits
-        
         json_path = str(_HERE / json_file)
 
         # ── 始终需要：加载 Pinocchio FK 函数供 solve() 使用 ──────────────────
@@ -131,20 +117,21 @@ class UR5eNMPC:
             ocp.model.cost_y_expr   = res_stage
             ocp.model.cost_y_expr_e = res_terminal
 
-            w_pos = np.array(self.weight_pos)
-            w_ori = np.array(self.weight_ori)
-            w_vel = self.weight_vel
-            w_tau = np.array(self.weight_tau)
+            # w_pos = 500.0; w_ori = 100.0; w_vel = 0.1
+            # w_tau_large = 0.001; w_tau_small = 0.01
+            w_pos = 2000.0; w_ori = 500.0; w_vel = 0.1
+            w_tau_large = 0.001; w_tau_small = 0.01
 
-            W_diag   = np.concatenate([w_pos, w_ori, [w_vel]*6, w_tau])
-            W_e_diag = np.concatenate([w_pos * self.terminal_pos_scale, w_ori * self.terminal_ori_scale])
+            W_diag   = np.array([w_pos]*3 + [w_ori]*3 + [w_vel]*6 +
+                                 [w_tau_large]*3 + [w_tau_small]*3)
+            W_e_diag = np.array([w_pos*20]*3 + [w_ori*20]*3)
             ocp.cost.W   = np.diag(W_diag)
             ocp.cost.W_e = np.diag(W_e_diag)
             ocp.cost.yref   = np.zeros(self.ny)
             ocp.cost.yref_e = np.zeros(self.ny_e)
             ocp.parameter_values = np.zeros(12)
 
-            tau_max = np.array(self.torque_limits)
+            tau_max = np.array([150., 150., 150., 28., 28., 28.])
             ocp.constraints.lbu   = -tau_max
             ocp.constraints.ubu   =  tau_max
             ocp.constraints.idxbu = np.arange(self.nu)
