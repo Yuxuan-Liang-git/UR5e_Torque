@@ -14,7 +14,7 @@ from collections import deque
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
-from Controller import NMPCController
+from Controller import NMPCController, PDJointController
 from nmpc_controller_ur5e import mj2pin_pos, mj2pin_rot
 
 _HERE = Path(__file__).parent.parent
@@ -42,7 +42,7 @@ SAVE_TRAJ = False
 _TRAJ_CFG = config["trajectory"]
 CIRCLE_RADIUS = _TRAJ_CFG["circle_radius"]
 CIRCLE_SPEED  = _TRAJ_CFG["circle_omega"]
-CIRCLE_CENTER = np.array([0.0, 0.5, 0.4])
+CIRCLE_CENTER = np.array([0.5, 0.0, 0.4])
 
 # Plot window
 ENABLE_PLOT  = True
@@ -57,7 +57,7 @@ def get_circle_target(t: float) -> np.ndarray:
     return np.array([
         CIRCLE_CENTER[0] + 2 * CIRCLE_RADIUS * math.sin(w * t),
         CIRCLE_CENTER[1] + CIRCLE_RADIUS * math.sin(2 * w * t),
-        CIRCLE_CENTER[2] + 1.5 * CIRCLE_RADIUS * math.cos(w * t),
+        CIRCLE_CENTER[2] + 1 * CIRCLE_RADIUS * math.cos(w * t),
     ])
 
 
@@ -109,6 +109,54 @@ class ReferenceQueue:
     def get(self) -> tuple[np.ndarray, np.ndarray]:
         idx = np.arange(self._head, self._head + self.N + 1) % (self.N + 1)
         return self._pos[:, idx], self._rot[:, idx]
+
+
+def compute_task_errors(
+    target_pos: np.ndarray,
+    target_quat: np.ndarray,
+    current_pos: np.ndarray,
+    current_mat: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    pos_err = target_pos - current_pos
+    curr_quat = np.zeros(4)
+    mujoco.mju_mat2Quat(curr_quat, current_mat.flatten())
+    quat_inv = np.zeros(4)
+    mujoco.mju_negQuat(quat_inv, curr_quat)
+    quat_err = np.zeros(4)
+    mujoco.mju_mulQuat(quat_err, target_quat, quat_inv)
+    if quat_err[0] < 0:
+        quat_err *= -1.0
+    rot_err = np.zeros(3)
+    mujoco.mju_quat2Vel(rot_err, quat_err, 1.0)
+    return pos_err, rot_err, curr_quat
+
+
+def map_task_target_to_joint(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    ee_site_id: int,
+    x_des_pos: np.ndarray,
+    x_des_quat: np.ndarray,
+    q_curr: np.ndarray,
+    actuator_ids: np.ndarray
+) -> np.ndarray:
+    """Project desired task-space pose error to joint-space target using pseudoinverse."""
+    current_pos = data.site_xpos[ee_site_id].copy()
+    current_mat = data.site_xmat[ee_site_id].reshape(3, 3)
+    pos_err, rot_err, _ = compute_task_errors(x_des_pos, x_des_quat, current_pos, current_mat)
+
+    jacp = np.zeros((3, model.nv))
+    jacr = np.zeros((3, model.nv))
+    mujoco.mj_jacSite(model, data, jacp, jacr, ee_site_id)
+    # Using only arm joints
+    J_arm = np.vstack([jacp[:, actuator_ids], jacr[:, actuator_ids]])
+
+    e6 = np.concatenate([pos_err, rot_err])
+    # 阻尼伪逆防止奇异
+    lambda_val = 1e-4
+    J_pinv = J_arm.T @ np.linalg.inv(J_arm @ J_arm.T + lambda_val ** 2 * np.eye(6))
+    dq_cmd = J_pinv @ e6
+    return q_curr + dq_cmd
 
 
 def make_pause_toggle(state: dict):
@@ -263,6 +311,16 @@ def main():
     print("Building NMPC Controller ...")
     nmpc_controller = NMPCController(model=m, config_path=_CONFIG_PATH, rebuild=REBUILD_SOLVER)
     
+    pdjoint_cfg = config.get("pdjoint_controller", {})
+    # kp = np.array(pdjoint_cfg.get("kp", [1000.0, 1000.0, 1000.0, 300.0, 150.0, 10.0]), dtype=float)
+    # kd = np.array(pdjoint_cfg.get("kd", [40.0, 40.0, 40.0, 10.0, 10.0, 1.0]), dtype=float)
+
+    kp = np.array([200.0, 200.0, 200.0, 400.0, 400.0, 50.0])
+    kd = np.array([10.0,  10.0,  10.0,  20.0,  20.0,  5.0])
+
+    torque_limits = np.array(config.get("safety", {}).get("torque_limits", [150, 150, 150, 28, 28, 28]), dtype=float)
+    joint_controller = PDJointController(model=m, kp=kp, kd=kd, torque_limits=torque_limits)
+
     # 因为Controller把引用的导出封装了，这里还是拿出来用于仿真画图算误差
     from export_model_ur5e import export_ur5e_model
     _, f_fk_pos, f_fk_rot, _, _ = export_ur5e_model()
@@ -328,15 +386,41 @@ def main():
                     ref_pos_batch[:, k] = pk
                     ref_rot_batch[:, k] = Rk.flatten(order='F')
 
-                # Controller内部会自动处理限幅和去重力计算 (重力用d.qfrc_bias)，
-                # 仿真环境自身就是理想物理引擎，不需要额外补偿或者扣除吗？
-                # 由于mujoco内部会有重力，如果在真实机器上扣除，在仿真上可能也需要传入d来扣除
-                u_opt = nmpc_controller.compute_torque(d, q_cur, v_cur, ref_pos_batch, ref_rot_batch)
-        
-
+                # ==================================================================
+                # NMPC Torques (for orientation loop / last 3 joints)
+                # ==================================================================
+                tau_nmpc = nmpc_controller.compute_torque(d, q_cur, v_cur, ref_pos_batch, ref_rot_batch)
                 _solve_times.append(nmpc_controller.solver.get_stats("time_tot"))
+
+                # ==================================================================
+                # PD Torques (for tracking pos / first 3 joints) 
+                # ==================================================================
+                # get target pose for t_traj to feed into Jacobian pseudo-inverse
+                t0_pos = _get_pos(t_traj)
+                t0_mat = _get_ori(t_traj)
+                t0_quat = np.zeros(4)
+                mujoco.mju_mat2Quat(t0_quat, t0_mat.flatten())
                 
-                d.ctrl[actuator_ids] = u_opt
+                # project to joint space
+                # q_des = map_task_target_to_joint(m, d, site_id, t0_pos, t0_quat, q_cur, actuator_ids)
+                q_des = q0[:6]
+                dq_des = np.zeros(nq)
+                
+                tau_pd = joint_controller.compute_torque(q_des, q_cur, dq_des, v_cur)
+
+                # ==================================================================
+                # Hybrid Control & Gravity compensation
+                # ==================================================================
+                # NMPC is designed to output (task_torque) without gravity. 
+                # PD controller outpus raw task_torque feedback without gravity.
+                # So we must manually add the MuJoCo simulated gravity compensation.
+
+                u_mixed = np.concatenate([tau_pd[:3], tau_nmpc[3:]])
+                u_final = u_mixed + d.qfrc_bias[actuator_ids]
+
+                # u_final = tau_nmpc
+                
+                d.ctrl[actuator_ids] = u_final
 
                 # ── 夹爪 PD 控制 ───────────────────────────────────────────────
                 if gripper_actuator_id is not None:
@@ -380,7 +464,7 @@ def main():
                     jerk_norm = float(np.linalg.norm((acc1-acc0)/max(0.5*(t1-t0+t2-t1),1e-6)))
                 else: jerk_norm = 0.0
 
-                if plotter: plotter.update(t_traj, pos_err, ori_err, u_opt, jerk_norm)
+                if plotter: plotter.update(t_traj, pos_err, ori_err, u_mixed, jerk_norm)
                 _pos_norm, _ori_norm = float(np.linalg.norm(pos_err)), float(np.linalg.norm(ori_err))
                 data_log.append((t_traj, _pos_norm, _ori_norm, jerk_norm))
 

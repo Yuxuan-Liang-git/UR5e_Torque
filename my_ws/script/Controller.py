@@ -224,9 +224,12 @@ class NMPCController(BaseController):
         w_vel = nmpc_cfg["weight_vel"]
         w_tau = nmpc_cfg["weight_tau"]
         
-        W_diag = np.array(list(w_pos) + list(w_ori) + [w_vel]*6 + list(w_tau))
+        W_diag = np.array(list(w_pos) + list(w_ori) + [w_vel] * 6 + list(w_tau))
         W_diag = np.maximum(W_diag, 1e-6)
-        W_e_diag = np.array(list(w_pos) + list(w_ori)) * nmpc_cfg.get("terminal_pos_scale", 10.0)
+        terminal_pos_scale = float(nmpc_cfg.get("terminal_pos_scale", 10.0))
+        terminal_ori_scale = float(nmpc_cfg.get("terminal_ori_scale", 10.0))
+        W_e_diag = np.array(list(np.array(w_pos, dtype=float) * terminal_pos_scale) +
+                    list(np.array(w_ori, dtype=float) * terminal_ori_scale))
         W_e_diag = np.maximum(W_e_diag, 1e-6)
         
         W_mat = np.diag(W_diag)
@@ -340,7 +343,7 @@ class NMPCController(BaseController):
         # 2. 设置参数 p 而非 yref (同步 nmpc_controller_ur5e.py 的逻辑)
         for k in range(self.N + 1):
             p_pin = mj2pin_pos(ref_pos_batch[:, k])
-            R_mj = ref_rot_batch[:, k].reshape(3, 3)
+            R_mj = ref_rot_batch[:, k].reshape(3, 3, order='F')
             R_pin = mj2pin_rot(R_mj)
             
             p_k = np.concatenate([p_pin, R_pin.flatten(order='F')])

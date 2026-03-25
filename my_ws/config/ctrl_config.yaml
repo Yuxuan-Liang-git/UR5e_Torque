@@ -44,20 +44,17 @@ nmpc_controller:
   horizon_time: 0.3
 
 
-  weight_pos: [10.0, 10.0, 10.0]
-  weight_ori: [1.0, 1.0, 1.0]
-  weight_vel: 0.1
-  weight_tau: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+  weight_pos: [0.05, 0.05, 0.05]
 
-  # weight_pos: [0.1, 0.1, 0.1]  # 即使只调姿态，也给位置留一点约束
-  # weight_ori: [1000.0, 1000.0, 1000.0]
-  # weight_vel: 0.1
-  # weight_tau: [100.0, 100.0, 100.0, 0.01, 0.01, 0.01] # 至少保留 1e-3 量级
+  # weight_pos: [2000.0, 2000.0, 2000.0]
+  weight_ori: [400.0, 400.0, 400.0]
+  weight_vel: 0.05
+  weight_tau: [0.01, 0.01, 0.01, 0.001, 0.001, 0.001]
 
 
 
-  terminal_pos_scale: 10.0
-  terminal_ori_scale: 10.0
+  terminal_pos_scale: 1.0
+  terminal_ori_scale: 60.0
 
   torque_limits: [150.0, 150.0, 150.0, 28.0, 28.0, 28.0]
 
