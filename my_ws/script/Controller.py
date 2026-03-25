@@ -1,5 +1,8 @@
 import numpy as np
 import mujoco
+from nmpc_controller_ur5e import mj2pin_pos, mj2pin_rot
+from acados_template import AcadosOcpSolver
+import yaml
 
 class BaseController:
     """控制器基类，提供统一的任务空间控制接口"""
@@ -183,6 +186,176 @@ class PDJointController(BaseController):
         dq = np.asarray(dq, dtype=float)
 
         tau = self.kp * (q_des - q) + self.kd * (dq_des - dq)
-        if self.torque_limits is not None:
-            tau = np.clip(tau, -self.torque_limits, self.torque_limits)
         return np.asarray(tau).flatten()
+
+
+class NMPCController(BaseController):
+    """
+    任务空间 NMPC 控制器，直接在类中初始化 Acados 求解器，参数从 yaml 读取。
+    """
+    def __init__(self, model, config_path, rebuild=False):
+        super().__init__(model)
+        
+        # 1. 加载配置
+        with open(config_path, 'r') as f:
+            cfg = yaml.safe_load(f)
+        nmpc_cfg = cfg.get("nmpc_controller")
+        if nmpc_cfg is None:
+            raise ValueError(f"Config file {config_path} missing 'nmpc_controller' section")
+            
+        self.N = nmpc_cfg["horizon_steps"]
+        self.Tf = nmpc_cfg["horizon_time"]
+        self.dt = self.Tf / self.N
+        self.torque_limits = np.array(nmpc_cfg.get("torque_limits", [150, 150, 150, 28, 28, 28]))
+
+        # 2. 导出模型并获取运动学函数
+        from export_model_ur5e import export_ur5e_model
+        import casadi as ca
+        from acados_template import AcadosOcp
+        import os
+        
+        acados_model, f_fk_pos, f_fk_rot, nq, nv = export_ur5e_model()
+        self.nx = nq + nv
+        self.nu = nq
+
+        # 获取权重并计算对角矩阵
+        w_pos = nmpc_cfg["weight_pos"]
+        w_ori = nmpc_cfg["weight_ori"]
+        w_vel = nmpc_cfg["weight_vel"]
+        w_tau = nmpc_cfg["weight_tau"]
+        
+        W_diag = np.array(list(w_pos) + list(w_ori) + [w_vel]*6 + list(w_tau))
+        W_diag = np.maximum(W_diag, 1e-6)
+        W_e_diag = np.array(list(w_pos) + list(w_ori)) * nmpc_cfg.get("terminal_pos_scale", 10.0)
+        W_e_diag = np.maximum(W_e_diag, 1e-6)
+        
+        W_mat = np.diag(W_diag)
+        W_e_mat = np.diag(W_e_diag)
+        
+        json_file = nmpc_cfg.get("json_file", "acados_ocp_ur5e.json")
+
+        if rebuild:
+            # 3. 构建 OCP 描述 (编译模式)
+            x_sym = acados_model.x
+            u_sym = acados_model.u
+            q_sym = x_sym[:nq]
+            v_sym = x_sym[nq:]
+
+            # 参数 p: [ref_pos(3), ref_rot(9)]
+            p_sym = ca.SX.sym("p", 12)
+            ref_pos = p_sym[:3]
+            ref_rot = ca.reshape(p_sym[3:12], 3, 3)
+            acados_model.p = p_sym
+
+            # 计算残差 (NONLINEAR_LS)
+            ee_pos = f_fk_pos(q_sym)
+            res_pos = ee_pos - ref_pos
+
+            ee_rot = f_fk_rot(q_sym)
+            R_err = ca.mtimes(ref_rot.T, ee_rot)
+            tr = R_err[0,0] + R_err[1,1] + R_err[2,2]
+            cos_th = ca.fmin(ca.fmax((tr - 1.0) / 2.0, -1.0 + 1e-6), 1.0 - 1e-6)
+            theta = ca.acos(cos_th)
+            coeff = theta / (2.0 * ca.sin(theta) + 1e-9)
+            res_ori = coeff * ca.vertcat(R_err[2,1] - R_err[1,2],
+                                         R_err[0,2] - R_err[2,0],
+                                         R_err[1,0] - R_err[0,1])
+            
+            res_stage = ca.vertcat(res_pos, res_ori, v_sym, u_sym) # 3+3+6+6=18
+            res_terminal = ca.vertcat(res_pos, res_ori)           # 6
+
+            ocp = AcadosOcp()
+            ocp.model = acados_model
+            ocp.dims.N = self.N
+            ocp.dims.np = 12
+
+            ocp.cost.cost_type = "NONLINEAR_LS"
+            ocp.cost.cost_type_e = "NONLINEAR_LS"
+            ocp.model.cost_y_expr = res_stage
+            ocp.model.cost_y_expr_e = res_terminal
+
+            ocp.cost.W = W_mat
+            ocp.cost.W_e = W_e_mat
+            ocp.cost.yref = np.zeros(18)
+            ocp.cost.yref_e = np.zeros(6)
+            ocp.parameter_values = np.zeros(12)
+
+            # 约束和求解器选项
+            ocp.constraints.lbu = -self.torque_limits
+            ocp.constraints.ubu =  self.torque_limits
+            ocp.constraints.idxbu = np.arange(self.nu)
+            ocp.constraints.x0 = np.zeros(self.nx)
+
+            s_cfg = nmpc_cfg.get("solver", {})
+            ocp.solver_options.qp_solver = s_cfg.get("qp_solver", "PARTIAL_CONDENSING_HPIPM")
+            ocp.solver_options.hessian_approx = s_cfg.get("hessian_approx", "GAUSS_NEWTON")
+            ocp.solver_options.integrator_type = s_cfg.get("integrator_type", "ERK")
+            ocp.solver_options.nlp_solver_type = s_cfg.get("nlp_solver_type", "SQP_RTI")
+            ocp.solver_options.tf = self.Tf
+            ocp.solver_options.qp_solver_iter_max = s_cfg.get("qp_solver_iter_max", 50)
+            ocp.solver_options.levenberg_marquardt = s_cfg.get("levenberg_marquardt", 1e-2)
+            
+            if os.path.exists(json_file):
+                os.remove(json_file)
+            
+            print("[INFO] Rebuilding Acados OCP solver...")
+            self.solver = AcadosOcpSolver(ocp, json_file=json_file)
+        else:
+            print("[INFO] Loading Acados OCP solver from existing build...")
+            self.solver = AcadosOcpSolver(None, json_file=json_file, generate=False, build=False)
+
+        # [关键] 无论是否 rebuild，都在线更新可变配置，从而保证修改 yaml 文件后无需重新编译也能生效！
+        # 注意: 如果修改了步长 N, 求解时间 Tf, 或者底层求解器类型(qp_solver等)，由于模型维度/架构改变，必须设置 rebuild: true ！
+        
+        # 1. 权重参数在线更新
+        for k in range(self.N):
+            self.solver.cost_set(k, "W", W_mat)
+        self.solver.cost_set(self.N, "W", W_e_mat)
+
+        # 2. 控制器扭矩软/硬限幅约束 (lbu, ubu) 在线更新
+        for k in range(self.N):
+            self.solver.constraints_set(k, "lbu", -self.torque_limits)
+            self.solver.constraints_set(k, "ubu", self.torque_limits)
+
+        # 3. 求解器选项在线更新 (仅限 acados 允许在线设置的部分参数，如 levenberg_marquardt)
+        s_cfg = nmpc_cfg.get("solver", {})
+        if "levenberg_marquardt" in s_cfg:
+            try:
+                self.solver.options_set("levenberg_marquardt", float(s_cfg["levenberg_marquardt"]))
+            except Exception:
+                pass
+
+
+    def compute_torque(self, data, q, dq, ref_pos_batch, ref_rot_batch):
+        """
+        计算 NMPC 力矩。
+        ref_pos_batch: [3, N+1] 参考位置序列 (MuJoCo 坐标系)
+        ref_rot_batch: [9, N+1] 参考旋转矩阵序列 (MuJoCo 坐标系)
+        """
+        # 1. 状态
+        x0 = np.concatenate([q, dq])
+        self.solver.set(0, "lbx", x0)
+        self.solver.set(0, "ubx", x0)
+
+        # 2. 设置参数 p 而非 yref (同步 nmpc_controller_ur5e.py 的逻辑)
+        for k in range(self.N + 1):
+            p_pin = mj2pin_pos(ref_pos_batch[:, k])
+            R_mj = ref_rot_batch[:, k].reshape(3, 3)
+            R_pin = mj2pin_rot(R_mj)
+            
+            p_k = np.concatenate([p_pin, R_pin.flatten(order='F')])
+            self.solver.set(k, "p", p_k)
+            
+            # 由于使用的是非线性 LS 且残差在 cost_y_expr 中减去了参考，这里 yref 设为 0
+            ny = 18 if k < self.N else 6
+            self.solver.set(k, "yref", np.zeros(ny))
+
+        # 3. 求解
+        status = self.solver.solve()
+        u_nmpc = self.solver.get(0, "u")
+        
+        # 4. 限幅与重力补偿
+        u_nmpc = np.clip(u_nmpc, -self.torque_limits, self.torque_limits)
+        tau_nmpc = u_nmpc - data.qfrc_bias[:6]
+        
+        return np.asarray(tau_nmpc).flatten()
