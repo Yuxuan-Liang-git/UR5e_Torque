@@ -42,7 +42,7 @@ SAVE_TRAJ = False
 _TRAJ_CFG = config["trajectory"]
 CIRCLE_RADIUS = _TRAJ_CFG["circle_radius"]
 CIRCLE_SPEED  = _TRAJ_CFG["circle_omega"]
-CIRCLE_CENTER = np.array([0.5, 0.0, 0.4])
+CIRCLE_CENTER = np.array([0.4, 0.0, 0.5])
 
 # Plot window
 ENABLE_PLOT  = True
@@ -55,14 +55,14 @@ window_width = 4.0   # seconds
 def get_circle_target(t: float) -> np.ndarray:
     w = CIRCLE_SPEED
     return np.array([
-        CIRCLE_CENTER[0] + 2 * CIRCLE_RADIUS * math.sin(w * t),
-        CIRCLE_CENTER[1] + CIRCLE_RADIUS * math.sin(2 * w * t),
-        CIRCLE_CENTER[2] + 1 * CIRCLE_RADIUS * math.cos(w * t),
+        CIRCLE_CENTER[0] + 1.0 * CIRCLE_RADIUS * math.sin(w * t),
+        CIRCLE_CENTER[1] + 0.5 * CIRCLE_RADIUS * math.sin(2 * w * t),
+        CIRCLE_CENTER[2] + 1.5 * CIRCLE_RADIUS * math.cos(w * t),
     ])
 
 
 def get_target_orientation(t: float) -> np.ndarray:
-    """基于有限差分计算切线方向的姿态阵."""
+    """Tangent-aligned rotation matrix in MuJoCo frame (finite-difference)."""
     p0 = get_circle_target(t)
     p1 = get_circle_target(t + dt)
     tangent = p1 - p0
@@ -70,7 +70,6 @@ def get_target_orientation(t: float) -> np.ndarray:
     if norm < 1e-6:
         return np.eye(3)
     tangent /= norm
-    
     z_axis = np.array([0.0, 0.0, -1.0])
     y_axis = np.cross(z_axis, tangent)
     y_norm = np.linalg.norm(y_axis)
@@ -351,6 +350,7 @@ def main():
     _ee_vel_buf = deque(maxlen=3)
     data_log = []
     _solve_times = deque(maxlen=200)
+    last_ref_rot = None
 
     # ── Simulation loop ───────────────────────────────────────────────────────
     with mujoco.viewer.launch_passive(
@@ -385,6 +385,7 @@ def main():
                     Rk = _get_ori(tk)
                     ref_pos_batch[:, k] = pk
                     ref_rot_batch[:, k] = Rk.flatten(order='F')
+                last_ref_rot = ref_rot_batch[:, 0].reshape(3, 3, order='F')
 
                 # ==================================================================
                 # NMPC Torques (for orientation loop / last 3 joints)
@@ -416,9 +417,9 @@ def main():
                 # So we must manually add the MuJoCo simulated gravity compensation.
 
                 u_mixed = np.concatenate([tau_pd[:3], tau_nmpc[3:]])
-                u_final = u_mixed + d.qfrc_bias[actuator_ids]
+                # u_final = u_mixed + d.qfrc_bias[actuator_ids]
 
-                # u_final = tau_nmpc
+                u_final = tau_nmpc
                 
                 d.ctrl[actuator_ids] = u_final
 
@@ -433,7 +434,8 @@ def main():
                     d.ctrl[gripper_actuator_id] = gripper_ctrl
 
                 # Mocap Visualisation
-                t0_pos, t0_rot = _get_pos(t_traj), _get_ori(t_traj)
+                t0_pos = _get_pos(t_traj)
+                t0_rot = last_ref_rot if last_ref_rot is not None else _get_ori(t_traj)
                 d.mocap_pos[mocap_id], q_mj = t0_pos, np.zeros(4)
                 mujoco.mju_mat2Quat(q_mj, t0_rot.flatten())
                 d.mocap_quat[mocap_id] = q_mj

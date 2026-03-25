@@ -44,11 +44,11 @@ nmpc_controller:
   horizon_time: 0.3
 
 
-  weight_pos: [0.05, 0.05, 0.05]
+  # weight_pos: [0.05, 0.05, 0.05]
 
-  # weight_pos: [2000.0, 2000.0, 2000.0]
-  weight_ori: [400.0, 400.0, 400.0]
-  weight_vel: 0.05
+  weight_pos: [2000.0, 2000.0, 2000.0]
+  weight_ori: [1000.0, 1000.0, 1000.0]
+  weight_vel: 0.1
   weight_tau: [0.01, 0.01, 0.01, 0.001, 0.001, 0.001]
 
 
