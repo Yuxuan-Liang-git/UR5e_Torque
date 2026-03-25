@@ -34,21 +34,21 @@ trajectory:
   control_dt: 0.02
 
 nmpc_controller:
-  rebuild: false 
+  rebuild: false  # 是否需要重新编译 acados 模型 
   mjcf_path: script/ur5e_gripper/scene.xml
   frame_name: attachment_site
   json_file: acados_ocp_ur5e.json
 
   # 这个参数变了需要rebuild  
-  horizon_steps: 15
-  horizon_time: 0.3
+  horizon_steps: 30
+  horizon_time: 0.6
 
 
-  # weight_pos: [0.05, 0.05, 0.05]
+  weight_pos: [0.05, 0.05, 0.05]
 
-  weight_pos: [2000.0, 2000.0, 2000.0]
-  weight_ori: [1000.0, 1000.0, 1000.0]
-  weight_vel: 0.1
+  # weight_pos: [2000.0, 2000.0, 2000.0]
+  weight_ori: [100000.0, 100000.0, 100000.0]
+  weight_vel: 0.5
   weight_tau: [0.01, 0.01, 0.01, 0.001, 0.001, 0.001]
 
 
