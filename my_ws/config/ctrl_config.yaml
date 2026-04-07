@@ -15,12 +15,12 @@ pdjoint_controller:
 
 impedance_controller:
   # 平移刚度 (N/m), 旋转刚度 (Nm/rad)
-  stiffness: [4000.0, 4000.0, 4000.0, 800.0, 800.0, 800.0]
+  stiffness: [4000.0, 4000.0, 4000.0, 700.0, 700.0, 700.0]
   # 阻尼比 (用于计算 D = 2 * zeta * sqrt(K * M))
-  damping_ratio: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
+  damping_ratio: [0.6, 0.6, 0.6, 0.5, 0.5, 0.5]
   # 阻抗控制器的目标质量阵对角元 (kg, kg*m^2)
   # (J * M^-1 * J^T)^-1 * M_m^-1 * PD
-  target_inertia: [2.0, 2.0, 2.0, 0.1, 0.1, 0.1]
+  target_inertia: [2.0, 2.0, 2.0, 0.2, 0.2, 0.2]
 
 # 通用控制器设置
 safety:
@@ -32,7 +32,7 @@ safety:
 trajectory:
   circle_radius: 0.08
   circle_omega: 0.8
-  control_dt: 0.002
+  control_dt: 0.01
 
 nmpc_controller:
   rebuild: false  # 是否需要重新编译 acados 模型 
@@ -45,11 +45,12 @@ nmpc_controller:
   horizon_time: 0.6
 
 
-  weight_pos: [0.05, 0.05, 0.05]
+  weight_pos: [0.01, 0.01, 0.01]
 
   # weight_pos: [2000.0, 2000.0, 2000.0]
   weight_ori: [500000.0, 500000.0, 500000.0]
-  weight_vel: 0.01
+  # 【关键】极大地惩罚前三轴的速度，让 NMPC 认为前三轴是“不可移动的”
+  weight_vel: [1000.0, 1000.0, 1000.0, 0.1, 0.1, 0.1]
   weight_tau: [0.01, 0.01, 0.01, 0.0001, 0.0001, 0.0001]
 
 

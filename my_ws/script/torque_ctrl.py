@@ -22,6 +22,8 @@ from rtde_receive import RTDEReceiveInterface
 
 # 导入自定义控制器
 from Controller import ImpedanceController, PDController
+# 导入可视化和日志工具类
+from visualization import VisualizationWorker, UDPLogger
 
 # Global visualization frequency (Hz), shared by control and visualization threads.
 VIS_FREQ = 50.0
@@ -54,8 +56,8 @@ def get_target_ori(t: float, x_des_pos_init: np.ndarray, circle_radius: float, c
     return np.column_stack([tangent, y_axis, z_axis])
 
 
-def get_traj(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> tuple[np.ndarray, np.ndarray]:
-    """获取 t 时刻的期望位置和四元数姿态"""
+def get_traj(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """获取 t 时刻的期望位置、四元数姿态和期望速度"""
     x_des_pos = get_traj_pos(t, x_des_pos_init, circle_radius, circle_omega)
     x_des_mat = get_target_ori(t, x_des_pos_init, circle_radius, circle_omega)
     x_des_quat = np.zeros(4)
@@ -80,7 +82,6 @@ def slerp(q1, q2, alpha):
     s0 = np.sin(theta_0 - theta_t) / sin_theta_0
     s1 = np.sin(theta_t) / sin_theta_0
     return (s0 * q1) + (s1 * q2)
-
 
 class UDPLogger:
     """通过 UDP 发送数据，用于 PlotJuggler 实时监控"""
@@ -269,6 +270,7 @@ class VisualizationWorker:
         if self.thread.is_alive():
             self.thread.join(timeout=1.0)
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="UR5e Task Space Impedance Control")
     parser.add_argument("--robot-ip", default="192.168.56.101", help="UR robot IP")
@@ -445,7 +447,7 @@ def main():
                 t_traj = t_now - RESET_END
                 x_des_pos, x_des_quat = get_traj(t_traj, x_des_pos_init, circle_radius, circle_omega)
                 v_des = np.zeros(6)
-
+            
             x_des_mat = np.zeros(9)
             mujoco.mju_quat2Mat(x_des_mat, x_des_quat)
             x_des_mat = x_des_mat.reshape(3, 3)
@@ -459,7 +461,7 @@ def main():
 
             # 仅在稳定阶段结束后发送力矩
             if t_now > STABILIZE_END:
-                ok = rtde_c.directTorque(tau.tolist(), False)
+                ok = rtde_c.directTorque(tau.tolist(),True)
                 if not ok:
                     print("[ERROR] directTorque failed")
                     break

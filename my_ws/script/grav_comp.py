@@ -60,7 +60,9 @@ def main() -> int:
 
             t_start = rtde_c.initPeriod()
 
-            ok = rtde_c.directTorque(zero_torque, friction_comp)
+            # ok = rtde_c.directTorque(zero_torque, friction_comp)
+            ok = rtde_c.directTorque(zero_torque, True)
+
             if not ok:
                 print("[ERROR] directTorque returned False; stopping test")
                 break
