@@ -1,7 +1,7 @@
 # 控制参数配置文件
 
 # 控制模式选择: "PD" 或 "Impedance"
-control_mode: "PD"
+control_mode: "Impedance"
 
 # PD 控制器专用配置
 pd_controller:
@@ -10,16 +10,16 @@ pd_controller:
 
 # 关节空间 PD 控制器参数 (torque_JointSpace.py)
 pdjoint_controller:
-  kp: [1000.0, 1000.0, 1000.0, 300.0, 150.0, 10.0]
-  kd: [40.0, 40.0, 40.0, 10.0, 10.0, 1.0]
+  kp: [1500.0, 1500.0, 1500.0, 500.0, 150.0, 40.0]
+  kd: [40.0, 40.0, 40.0, 10.0, 10.0, 2.0]
 
 impedance_controller:
   # 平移刚度 (N/m), 旋转刚度 (Nm/rad)
-  stiffness: [800.0, 800.0, 1000.0, 50.0, 50.0, 100.0]
+  stiffness: [800.0, 800.0, 1000.0, 400.0, 400.0, 400.0]
   # 阻尼比 (用于计算 D = 2 * zeta * sqrt(K * M))
-  damping_ratio: [0.6, 0.6, 0.6, 0.2, 0.2, 0.2]
+  damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
   # 阻抗控制器的目标质量阵对角元 (kg, kg*m^2)
-  target_inertia: [0.5, 0.5, 0.5, 0.3, 0.3, 0.3]
+  target_inertia: [1.0, 1.0, 1.0, 0.1, 0.1, 0.1]
 
 # 通用控制器设置
 safety:
@@ -47,14 +47,14 @@ nmpc_controller:
   weight_pos: [0.05, 0.05, 0.05]
 
   # weight_pos: [2000.0, 2000.0, 2000.0]
-  weight_ori: [100000.0, 100000.0, 100000.0]
-  weight_vel: 0.5
-  weight_tau: [0.01, 0.01, 0.01, 0.001, 0.001, 0.001]
+  weight_ori: [500000.0, 500000.0, 500000.0]
+  weight_vel: 0.01
+  weight_tau: [0.01, 0.01, 0.01, 0.0001, 0.0001, 0.0001]
 
 
 
   terminal_pos_scale: 1.0
-  terminal_ori_scale: 60.0
+  terminal_ori_scale: 100.0
 
   torque_limits: [150.0, 150.0, 150.0, 28.0, 28.0, 28.0]
 

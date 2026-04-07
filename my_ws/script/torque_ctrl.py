@@ -314,7 +314,7 @@ def main():
         if 'stiffness' in imp_cfg and isinstance(imp_cfg['stiffness'], list):
             stiffness = np.diag(imp_cfg['stiffness'])
             damping_ratio = np.diag(imp_cfg.get('damping_ratio', [1.0]*6))
-            target_inertia = np.diag(imp_cfg.get('inertia', [1.0]*6))
+            target_inertia = np.diag(imp_cfg.get('target_inertia', [1.0]*6))
             # 临界阻尼: D = 2 * zeta * sqrt(K * M)
             damping = damping_ratio * 2.0 * np.sqrt(stiffness @ target_inertia)
         else:
