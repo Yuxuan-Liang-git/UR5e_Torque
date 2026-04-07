@@ -15,11 +15,12 @@ pdjoint_controller:
 
 impedance_controller:
   # 平移刚度 (N/m), 旋转刚度 (Nm/rad)
-  stiffness: [800.0, 800.0, 1000.0, 400.0, 400.0, 400.0]
+  stiffness: [4000.0, 4000.0, 4000.0, 800.0, 800.0, 800.0]
   # 阻尼比 (用于计算 D = 2 * zeta * sqrt(K * M))
-  damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  damping_ratio: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
   # 阻抗控制器的目标质量阵对角元 (kg, kg*m^2)
-  target_inertia: [1.0, 1.0, 1.0, 0.1, 0.1, 0.1]
+  # (J * M^-1 * J^T)^-1 * M_m^-1 * PD
+  target_inertia: [2.0, 2.0, 2.0, 0.1, 0.1, 0.1]
 
 # 通用控制器设置
 safety:
@@ -31,7 +32,7 @@ safety:
 trajectory:
   circle_radius: 0.08
   circle_omega: 0.8
-  control_dt: 0.02
+  control_dt: 0.002
 
 nmpc_controller:
   rebuild: false  # 是否需要重新编译 acados 模型 

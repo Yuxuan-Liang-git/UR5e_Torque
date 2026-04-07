@@ -459,7 +459,7 @@ def main():
 
             # 仅在稳定阶段结束后发送力矩
             if t_now > STABILIZE_END:
-                ok = rtde_c.directTorque(tau.tolist(), True)
+                ok = rtde_c.directTorque(tau.tolist(), False)
                 if not ok:
                     print("[ERROR] directTorque failed")
                     break
