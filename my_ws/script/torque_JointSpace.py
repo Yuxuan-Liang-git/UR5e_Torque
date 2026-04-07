@@ -336,10 +336,15 @@ def main():
     except KeyboardInterrupt:
         print("\n[INFO] Stopped by user")
     finally:
+        print("[INFO] Cleaning up...")
         if visualizer is not None:
             visualizer.stop()
         logger.stop()
-        rtde_c.stopScript()
+        try:
+            rtde_c.stopScript()
+            rtde_c.disconnect()
+        except:
+            pass
         print("[INFO] Script stopped")
 
 
