@@ -17,10 +17,11 @@ VIS_FREQ = 50.0
 
 def get_traj_pos(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> np.ndarray:
     return x_des_pos_init + np.array([
-        2.0 * circle_radius * np.sin(circle_omega * t),
-        circle_radius * np.sin(2.0 * circle_omega * t),
-        1.0 * circle_radius * np.sin(circle_omega * t),
+        - 2.0 * circle_radius * (np.cos(circle_omega * t) - 1.0),
+        1.0 * circle_radius * np.sin(2.0 * circle_omega * t),
+        - 0.5 * circle_radius * (np.cos(circle_omega * t) - 1.0),
     ])
+
 
 def get_target_ori(
     t: float,
@@ -53,24 +54,91 @@ def get_traj(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_
         x_des_quat *= -1.0
     return x_des_pos, x_des_quat
 
+def compute_task_errors(
+    target_pos: np.ndarray,
+    target_quat: np.ndarray,
+    current_pos: np.ndarray,
+    current_mat: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    pos_err = target_pos - current_pos
+    curr_quat = np.zeros(4)
+    mujoco.mju_mat2Quat(curr_quat, current_mat.flatten())
+    quat_inv = np.zeros(4)
+    mujoco.mju_negQuat(quat_inv, curr_quat)
+    quat_err = np.zeros(4)
+    mujoco.mju_mulQuat(quat_err, target_quat, quat_inv)
+    if quat_err[0] < 0:
+        quat_err *= -1.0
+    rot_err = np.zeros(3)
+    mujoco.mju_quat2Vel(rot_err, quat_err, 1.0)
+    return pos_err, rot_err
+
+
+def map_task_target_to_joint_dls(
+    model: mujoco.MjModel,
+    data_ik: mujoco.MjData,
+    ee_site_id: int,
+    x_des_pos: np.ndarray,
+    x_des_quat: np.ndarray,
+    q_curr: np.ndarray,
+    damping: float = 1e-2,
+) -> np.ndarray:
+    """One-step damped least squares IK update: q_next = q + dq."""
+    data_ik.qpos[:6] = q_curr
+    data_ik.qvel[:6] = 0.0
+    mujoco.mj_forward(model, data_ik)
+
+    current_pos = data_ik.site_xpos[ee_site_id].copy()
+    current_mat = data_ik.site_xmat[ee_site_id].reshape(3, 3)
+    pos_err, rot_err = compute_task_errors(x_des_pos, x_des_quat, current_pos, current_mat)
+
+    jacp = np.zeros((3, model.nv))
+    jacr = np.zeros((3, model.nv))
+    mujoco.mj_jacSite(model, data_ik, jacp, jacr, ee_site_id)
+    J6 = np.vstack([jacp[:, :6], jacr[:, :6]])
+    e6 = np.concatenate([pos_err, rot_err])
+
+    # DLS: dq = J^T (J J^T + λ I)^-1 e
+    JJ = J6 @ J6.T + damping * np.eye(6)
+    dq_cmd = J6.T @ np.linalg.solve(JJ, e6)
+    return q_curr + dq_cmd
+
+
 def build_reference_batch(
+    model: mujoco.MjModel,
+    data_ik: mujoco.MjData,
+    ee_site_id: int,
+    q_curr: np.ndarray,
     t_traj: float,
     x_des_pos_init: np.ndarray,
     circle_radius: float,
     circle_omega: float,
     horizon_steps: int,
     dt: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Build N+1 task references in MuJoCo frame for NMPC."""
-    ref_pos_batch = np.zeros((3, horizon_steps + 1))
-    ref_rot_batch = np.zeros((9, horizon_steps + 1))
+) -> np.ndarray:
+    """Build N+1 joint references for NMPC from task-space trajectory via IK."""
+    ref_q_batch = np.zeros((6, horizon_steps + 1))
+    q_sim = q_curr.copy()
     for k in range(horizon_steps + 1):
         tk = t_traj + k * dt
-        pk = get_traj_pos(tk, x_des_pos_init, circle_radius, circle_omega)
-        rk = get_target_ori(tk, x_des_pos_init, circle_radius, circle_omega)
-        ref_pos_batch[:, k] = pk
-        ref_rot_batch[:, k] = rk.flatten(order="F")
-    return ref_pos_batch, ref_rot_batch
+        pk, rk_quat = get_traj(tk, x_des_pos_init, circle_radius, circle_omega)
+        q_sim = map_task_target_to_joint_dls(
+            model=model,
+            data_ik=data_ik,
+            ee_site_id=ee_site_id,
+            x_des_pos=pk,
+            x_des_quat=rk_quat,
+            q_curr=q_sim,
+        )
+        ref_q_batch[:, k] = q_sim
+
+    # Finite-difference desired joint velocities across the horizon
+    ref_dq_batch = np.zeros_like(ref_q_batch)
+    for k in range(horizon_steps):
+        ref_dq_batch[:, k] = (ref_q_batch[:, k + 1] - ref_q_batch[:, k]) / dt
+    ref_dq_batch[:, horizon_steps] = ref_dq_batch[:, horizon_steps - 1]
+
+    return ref_q_batch, ref_dq_batch
 
 def parse_args():
     parser = argparse.ArgumentParser(description="UR5e Hybrid Control (PD + NMPC)")
@@ -136,6 +204,7 @@ def main():
     model = mujoco.MjModel.from_xml_path(str(xml_path))
     data = mujoco.MjData(model)
     data_plan = mujoco.MjData(model)
+    data_ik = mujoco.MjData(model)
     
     joint_controller = PDJointController(model=model, kp=kp, kd=kd, torque_limits=torque_limits)
     nmpc_controller = NMPCController(model=model, config_path=args.config, rebuild=rebuild_solver)
@@ -266,7 +335,11 @@ def main():
                 mujoco.mju_quat2Mat(x_des_mat, x_des_quat)
                 x_des_mat = x_des_mat.reshape(3, 3)
 
-                ref_pos_batch, ref_rot_batch = build_reference_batch(
+                ref_q_batch, ref_dq_batch = build_reference_batch(
+                    model,
+                    data_ik,
+                    ee_site_id,
+                    q,
                     t_traj,
                     x_des_pos_init,
                     circle_radius,
@@ -274,14 +347,14 @@ def main():
                     horizon_steps,
                     dt,
                 )
-                
-                tau_nmpc = nmpc_controller.compute_torque(data, q, dq, ref_pos_batch, ref_rot_batch)
-                
+
+                tau_nmpc = nmpc_controller.compute_torque(data, q, dq, ref_q_batch, ref_dq_batch)
+
                 # =============================================================
-                # 锁定前三轴，使用初始位置目标
+                # PD 跟随同一个关节空间目标（来自 IK 参考），保证混合控制一致
                 # =============================================================
-                q_des = q_target.copy()
-                dq_des = np.zeros(6)
+                q_des = ref_q_batch[:, 0].copy()
+                dq_des = ref_dq_batch[:, 0].copy()
 
             # 计算 PD 控制力矩 (不含重力)
             tau_pd = joint_controller.compute_torque(q_des, q, dq_des, dq)
@@ -290,7 +363,8 @@ def main():
             # 拼接力矩: 前三轴 PD, 后三轴 NMPC
             # =================================================================
             if traj_started:
-                tau = np.concatenate([tau_pd[:3], tau_nmpc[3:]])
+                # tau = np.concatenate([tau_pd[:3], tau_nmpc[3:]])
+                tau = tau_nmpc
             else:
                 tau = tau_pd
 
