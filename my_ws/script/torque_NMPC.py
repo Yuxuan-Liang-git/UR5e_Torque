@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-"""Joint-space PD torque control for UR5e with figure-8 EE tracking & NMPC orientation.
-
-Control law:
-    tau = Kp * (q_des - q) + Kd * (dq_des - dq)  (For joints 0, 1, 2)
-    tau = NMPC_opt                               (For joints 3, 4, 5)
-
-First 3 joints are locked to initial positions. Last 3 track orientation.
-"""
-
 import argparse
 import time
 from pathlib import Path
@@ -29,9 +19,8 @@ def get_traj_pos(t: float, x_des_pos_init: np.ndarray, circle_radius: float, cir
     return x_des_pos_init + np.array([
         2.0 * circle_radius * np.sin(circle_omega * t),
         circle_radius * np.sin(2.0 * circle_omega * t),
-        0.5 * circle_radius * np.sin(circle_omega * t),
+        1.0 * circle_radius * np.sin(circle_omega * t),
     ])
-
 
 def get_target_ori(
     t: float,
@@ -55,7 +44,6 @@ def get_target_ori(
     z_axis = np.cross(tangent, y_axis)
     return np.column_stack([tangent, y_axis, z_axis])
 
-
 def get_traj(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> tuple[np.ndarray, np.ndarray]:
     x_des_pos = get_traj_pos(t, x_des_pos_init, circle_radius, circle_omega)
     x_des_mat = get_target_ori(t, x_des_pos_init, circle_radius, circle_omega)
@@ -64,7 +52,6 @@ def get_traj(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_
     if x_des_quat[0] < 0:
         x_des_quat *= -1.0
     return x_des_pos, x_des_quat
-
 
 def build_reference_batch(
     t_traj: float,
@@ -85,7 +72,6 @@ def build_reference_batch(
         ref_rot_batch[:, k] = rk.flatten(order="F")
     return ref_pos_batch, ref_rot_batch
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description="UR5e Hybrid Control (PD + NMPC)")
     parser.add_argument("--robot-ip", default="192.168.56.101", help="UR robot IP")
@@ -96,7 +82,6 @@ def parse_args():
     parser.add_argument("--udp-port", type=int, default=9870, help="UDP destination port for PlotJuggler")
     parser.add_argument("--udp-div", type=int, default=2, help="Send one packet every N control loops")
     return parser.parse_args()
-
 
 def load_init_q(init_pos_path: Path):
     if not init_pos_path.exists():
@@ -113,7 +98,6 @@ def load_init_q(init_pos_path: Path):
     except Exception as e:
         print(f"[WARN] Failed to read init_pos file: {e}")
         return None
-
 
 def main():
     args = parse_args()
@@ -260,6 +244,20 @@ def main():
                 x_des_mat = data_plan.site_xmat[ee_site_id].reshape(3, 3).copy()
             else:
                 if not traj_started:
+                    print("[INFO] Transitioning to NMPC. Re-warming solver with current PD torques...")
+                    # 1. 获取当前机器人的真实状态
+                    x_current = np.concatenate([q, dq])
+                    
+                    # 2. 构造当前实际生效的总力矩 (PD 输出 + 重力补偿)
+                    # 因为 NMPC 内部动力学 (ABA) 需要的是包含重力的总力矩
+                    u_current = tau_pd + data.qfrc_bias[:6]
+                    
+                    # 3. 强制覆盖 NMPC 预测视野内的所有猜测点,防止突变
+                    for k in range(horizon_steps + 1):
+                        nmpc_controller.solver.set(k, "x", x_current)
+                    for k in range(horizon_steps):
+                        nmpc_controller.solver.set(k, "u", u_current)
+
                     traj_started = True
 
                 t_traj = t_now - RESET_END
@@ -297,7 +295,6 @@ def main():
                 tau = tau_pd
 
             if t_now > STABILIZE_END:
-                # 下发给机器人的 directTorque 默认已经包含机器人自带的重力补偿。
                 ok = rtde_c.directTorque(tau.tolist(), True)
                 if not ok:
                     print("[ERROR] directTorque failed")

@@ -1,7 +1,7 @@
 # 控制参数配置文件
 
 # 控制模式选择: "PD" 或 "Impedance"
-control_mode: "Impedance"
+control_mode: "PD"
 
 # PD 控制器专用配置
 pd_controller:
@@ -31,7 +31,7 @@ safety:
 
 trajectory:
   circle_radius: 0.08
-  circle_omega: 0.8
+  circle_omega: 0.5
   control_dt: 0.01
 
 nmpc_controller:
@@ -41,22 +41,20 @@ nmpc_controller:
   json_file: acados_ocp_ur5e.json
 
   # 这个参数变了需要rebuild  
-  horizon_steps: 30
-  horizon_time: 0.6
+  horizon_steps: 10
+  horizon_time: 0.1
 
 
   weight_pos: [0.01, 0.01, 0.01]
-
-  # weight_pos: [2000.0, 2000.0, 2000.0]
-  weight_ori: [500000.0, 500000.0, 500000.0]
+  weight_ori: [2000.0, 2000.0, 2000.0]
   # 【关键】极大地惩罚前三轴的速度，让 NMPC 认为前三轴是“不可移动的”
-  weight_vel: [1000.0, 1000.0, 1000.0, 0.1, 0.1, 0.1]
-  weight_tau: [0.01, 0.01, 0.01, 0.0001, 0.0001, 0.0001]
+  weight_vel: [1000.0, 1000.0, 1000.0, 0.001, 0.001, 0.001]
+  weight_tau: [0.01, 0.01, 0.01, 0.00001, 0.00001, 0.00001]
 
 
 
   terminal_pos_scale: 1.0
-  terminal_ori_scale: 100.0
+  terminal_ori_scale: 10.0
 
   torque_limits: [150.0, 150.0, 150.0, 28.0, 28.0, 28.0]
 
