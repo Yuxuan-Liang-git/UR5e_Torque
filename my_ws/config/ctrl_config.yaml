@@ -31,7 +31,7 @@ safety:
 
 trajectory:
   circle_radius: 0.08
-  circle_omega: 0.5
+  circle_omega: 0.8
   control_dt: 0.01
 
 nmpc_controller:
@@ -41,19 +41,20 @@ nmpc_controller:
   json_file: acados_ocp_ur5e.json
 
   # 这个参数变了需要rebuild  
-  horizon_steps: 10
-  horizon_time: 0.1
+  horizon_steps: 30
+  horizon_time: 0.3
 
+  # weight_pos: [8000.0, 8000.0, 8000.0]
+  # weight_ori: [15000.0, 15000.0, 15000.0]
+  # weight_vel: [0.5, 0.5, 0.5, 0.01, 0.01, 0.01]
+  # weight_tau: [0.01, 0.01, 0.01, 0.001, 0.001, 0.001]
 
-  weight_pos: [0.01, 0.01, 0.01]
-  weight_ori: [2000.0, 2000.0, 2000.0]
-  # 【关键】极大地惩罚前三轴的速度，让 NMPC 认为前三轴是“不可移动的”
-  weight_vel: [1000.0, 1000.0, 1000.0, 0.001, 0.001, 0.001]
-  weight_tau: [0.01, 0.01, 0.01, 0.00001, 0.00001, 0.00001]
+  weight_pos: [5000.0, 5000.0, 5000.0]
+  weight_ori: [1.0, 1.0, 1.0]
+  weight_vel: [2.0, 2.0, 2.0, 1000.0, 1000.0, 1000.0]
+  weight_tau: [0.001, 0.001, 0.001, 0.0005, 0.0005, 0.0005]
 
-
-
-  terminal_pos_scale: 1.0
+  terminal_pos_scale: 10.0
   terminal_ori_scale: 10.0
 
   torque_limits: [150.0, 150.0, 150.0, 28.0, 28.0, 28.0]
