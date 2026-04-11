@@ -1,26 +1,48 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import yaml
+from pathlib import Path
 
-def generate_trajectory(q_init_5=0.0, num_scan_points=10):
+def generate_trajectory(joint_idx=5, q_init_act=0.0, config_path="Config/Ref.yaml"):
+    """
+    Generate trajectory for a specific joint.
+    joint_idx: 0 to 5 (Base to Wrist 3)
+    q_init_act: initial position of the active joint
+    """
+    # 1. 加载配置文件
+    try:
+        with open(config_path, 'r') as f:
+            full_cfg = yaml.safe_load(f)
+            # 使用 0-indexed 名称
+            joint_key = f"joint_{joint_idx}"
+            cfg = full_cfg['joint_params'][joint_key]
+    except Exception as e:
+        print(f"[ERROR] Failed to load config for {joint_idx}: {e}")
+        # 默认回退到 joint_6 的参数
+        cfg = {
+            "v_min": 0.1, "v_max": 2.0, "num_scan_points": 10,
+            "scan_range": 1.2, "max_acc": 1.0, "t_fourier": 20.0,
+            "f_base": 0.3, "amps": [0.4, 0.2, 0.1], "freq_mults": [1.0, 2.0, 3.0]
+        }
+
+    # 2. 提取并映射参数
+    V_MIN = cfg['v_min']
+    V_MAX = cfg['v_max']
+    N_SCAN = cfg['num_scan_points']
+    SCAN_RANGE = cfg['scan_range']
+    MAX_ACC = cfg['max_acc']
+    T_FOURIER = cfg['t_fourier']
+    F_BASE = cfg['f_base']
+    AMPS = cfg['amps']
+    FREQ_MULTS = cfg['freq_mults']
+
     # --- 自动生成速度扫描序列 (平方分布实现低速加密) ---
-    v_min, v_max = 0.1, 2.0
-    if num_scan_points > 1:
-        V_SCAN_STEPS = [v_min + (v_max - v_min) * (i / (num_scan_points - 1))**2 for i in range(num_scan_points)]
+    if N_SCAN > 1:
+        V_SCAN_STEPS = [V_MIN + (V_MAX - V_MIN) * (i / (N_SCAN - 1))**2 for i in range(N_SCAN)]
     else:
-        V_SCAN_STEPS = [v_min]
+        V_SCAN_STEPS = [V_MIN]
     
-    SCAN_RANGE = 1.2
-    MAX_ACC = 1.0 # 提高加速
-    
-    T_FOURIER = 20.0
-    F_BASE = 0.3
     W_BASE = 2 * np.pi * F_BASE
-    A_FOUR = np.array([0.20, 0.15, 0.10, 0.05, 0.02])
-    B_FOUR = np.array([0.18, 0.12, 0.08, 0.04, 0.01])
-    Q_FIX = 0.0
-    for l in range(1, 6):
-        Q_FIX += B_FOUR[l-1] / (l * W_BASE)
-
     dt = 0.002
     
     # --- 动态计算总时长 ---
@@ -35,7 +57,7 @@ def generate_trajectory(q_init_5=0.0, num_scan_points=10):
         T_SCAN += 2 * (2 * ta + tc)
     T_MOVE_TO_ZERO = 3.0
     
-    T_TOTAL = T_INIT_MOVE + T_SCAN + T_MOVE_TO_ZERO + T_FOURIER + 0.5 # 留 0.5s 余量
+    T_TOTAL = T_INIT_MOVE + T_SCAN + T_MOVE_TO_ZERO + T_FOURIER + 0.5 
     time_vec = np.arange(0, T_TOTAL, dt)
     
     q_out = []
@@ -48,13 +70,11 @@ def generate_trajectory(q_init_5=0.0, num_scan_points=10):
     v_idx = 0
     sub_stage = "INIT_MOVE"
     t_sub_start = 0.0
-    q_curr_ref = q_init_5 # 记录当前指令位置以保持连续
+    q_curr_ref = q_init_act
     
     def get_smooth_move(t_sub, q_start, q_end, duration):
-        if t_sub >= duration:
-            return q_end, 0.0, 0.0
+        if t_sub >= duration: return q_end, 0.0, 0.0
         alpha = t_sub / duration
-        # 五次多项式平滑轨迹
         s = 10*alpha**3 - 15*alpha**4 + 6*alpha**5
         ds = (30*alpha**2 - 60*alpha**3 + 30*alpha**4) / duration
         dds = (60*alpha - 180*alpha**2 + 120*alpha**3) / (duration**2)
@@ -68,9 +88,9 @@ def generate_trajectory(q_init_5=0.0, num_scan_points=10):
         t_in_sub = t_curr - t_sub_start
         
         if sub_stage == "INIT_MOVE":
-            # 初始移动到起点
             stage = 0
-            q_ref, dq_ref, ddq_ref = get_smooth_move(t_in_sub, q_init_5, -SCAN_RANGE, 5.0)
+            # 目标位置改为 q_init_act - SCAN_RANGE
+            q_ref, dq_ref, ddq_ref = get_smooth_move(t_in_sub, q_init_act, q_init_act - SCAN_RANGE, 5.0)
             if t_in_sub >= 5.0:
                 sub_stage = "SCAN_CYCLE"
                 t_sub_start = t_curr
@@ -79,10 +99,8 @@ def generate_trajectory(q_init_5=0.0, num_scan_points=10):
             stage = 1
             vk = V_SCAN_STEPS[v_idx]
             ta = vk / MAX_ACC
-            # 梯形位移公式: Total_S = 2*SCAN_RANGE = vk*ta + vk*tc
-            # 因此 tc = (2*SCAN_RANGE)/vk - ta
             tc = (2 * SCAN_RANGE) / vk - ta
-            if tc < 0: # 保护: 如果加速度太小导致无法达到目标速度
+            if tc < 0:
                 tc = 0
                 ta = np.sqrt(2 * SCAN_RANGE / MAX_ACC)
                 vk = MAX_ACC * ta
@@ -90,32 +108,33 @@ def generate_trajectory(q_init_5=0.0, num_scan_points=10):
             dur = 2 * (2 * ta + tc)
             t_in = t_in_sub
             
+            # 在 [q_init_act - SCAN_RANGE, q_init_act + SCAN_RANGE] 之间摆动
             if t_in < ta: # 正向加速
                 dq_ref = (vk / ta) * t_in
-                q_ref = -SCAN_RANGE + 0.5 * (vk / ta) * t_in**2
+                q_ref = (q_init_act - SCAN_RANGE) + 0.5 * (vk / ta) * t_in**2
                 ddq_ref = vk / ta
-            elif t_in < ta + tc: # 正向匀速 (Region B)
+            elif t_in < ta + tc: # 正向匀速
                 dq_ref = vk
-                q_ref = (-SCAN_RANGE + 0.5 * vk * ta) + vk * (t_in - ta)
+                q_ref = (q_init_act - SCAN_RANGE + 0.5 * vk * ta) + vk * (t_in - ta)
                 ddq_ref = 0.0
             elif t_in < 2 * ta + tc: # 正向减速
                 t_dec = t_in - (ta + tc)
                 dq_ref = vk - (vk / ta) * t_dec
-                q_ref = (SCAN_RANGE - 0.5 * vk * ta) + vk * t_dec - 0.5 * (vk / ta) * t_dec**2
+                q_ref = (q_init_act + SCAN_RANGE - 0.5 * vk * ta) + vk * t_dec - 0.5 * (vk / ta) * t_dec**2
                 ddq_ref = -vk / ta
             elif t_in < 3 * ta + tc: # 反向加速
                 t_acc_rev = t_in - (2 * ta + tc)
                 dq_ref = -(vk / ta) * t_acc_rev
-                q_ref = SCAN_RANGE - 0.5 * (vk / ta) * t_acc_rev**2
+                q_ref = (q_init_act + SCAN_RANGE) - 0.5 * (vk / ta) * t_acc_rev**2
                 ddq_ref = -vk / ta
-            elif t_in < 3 * ta + 2 * tc: # 反向匀速 (Region D)
+            elif t_in < 3 * ta + 2 * tc: # 反向匀速
                 dq_ref = -vk
-                q_ref = (SCAN_RANGE - 0.5 * vk * ta) - vk * (t_in - (3 * ta + tc))
+                q_ref = (q_init_act + SCAN_RANGE - 0.5 * vk * ta) - vk * (t_in - (3 * ta + tc))
                 ddq_ref = 0.0
             elif t_in < dur: # 反向减速
                 t_dec_rev = t_in - (3 * ta + 2 * tc)
                 dq_ref = -vk + (vk / ta) * t_dec_rev
-                q_ref = (-SCAN_RANGE + 0.5 * vk * ta) - vk * t_dec_rev + 0.5 * (vk / ta) * t_dec_rev**2
+                q_ref = (q_init_act - SCAN_RANGE + 0.5 * vk * ta) - vk * t_dec_rev + 0.5 * (vk / ta) * t_dec_rev**2
                 ddq_ref = vk / ta
             
             if t_in >= dur:
@@ -124,11 +143,12 @@ def generate_trajectory(q_init_5=0.0, num_scan_points=10):
                 if v_idx >= len(V_SCAN_STEPS):
                     sub_stage = "MOVE_TO_ZERO"
                 else:
-                    sub_stage = "SCAN_CYCLE" # 准备下一档速度
+                    sub_stage = "SCAN_CYCLE"
         
         elif sub_stage == "MOVE_TO_ZERO":
-            stage = 1.5 # 过渡阶段
-            q_ref, dq_ref, ddq_ref = get_smooth_move(t_in_sub, -SCAN_RANGE, 0.0, 3.0)
+            stage = 1.5
+            # 回到 q_init_act
+            q_ref, dq_ref, ddq_ref = get_smooth_move(t_in_sub, q_init_act - SCAN_RANGE, q_init_act, 3.0)
             if t_in_sub >= 3.0:
                 sub_stage = "FOURIER"
                 t_sub_start = t_curr
@@ -136,12 +156,7 @@ def generate_trajectory(q_init_5=0.0, num_scan_points=10):
         elif sub_stage == "FOURIER":
             stage = 2
             tf = t_in_sub
-            # 三个正弦信号叠加: q = sum(Ai * sin(wi * t))
-            # 频率分别为 f, 2f, 3f
-            AMPS = [0.4, 0.2, 0.1] # 幅值分布
-            FREQ_MULTS = [1.0, 2.0, 3.0]
-            
-            q_ref, dq_ref, ddq_ref = 0.0, 0.0, 0.0
+            q_ref, dq_ref, ddq_ref = q_init_act, 0.0, 0.0 # 修改: 以 q_init_act 为偏置
             for i in range(3):
                 wi = FREQ_MULTS[i] * W_BASE
                 Ai = AMPS[i]
@@ -153,8 +168,8 @@ def generate_trajectory(q_init_5=0.0, num_scan_points=10):
                 sub_stage = "FINISH"
                 t_sub_start = t_curr
         else:
-            stage = 3 # 已完成
-            q_ref, dq_ref, ddq_ref = 0.0, 0.0, 0.0
+            stage = 3 # Finished
+            q_ref, dq_ref, ddq_ref = q_init_act, 0.0, 0.0
             
         q_curr_ref = q_ref
         q_out.append(q_ref)
@@ -165,12 +180,13 @@ def generate_trajectory(q_init_5=0.0, num_scan_points=10):
     return time_vec, np.array(q_out), np.array(dq_out), np.array(ddq_out), np.array(stage_out)
 
 if __name__ == "__main__":
-    t, q, dq, ddq, stg = generate_trajectory()
+    # Test for Joint 5 (Wrist 3)
+    t, q, dq, ddq, stg = generate_trajectory(joint_idx=5)
     plt.figure(figsize=(12, 10))
-    plt.subplot(4, 1, 1); plt.plot(t, q, 'b'); plt.ylabel("Pos (rad)"); plt.grid(True)
-    plt.subplot(4, 1, 2); plt.plot(t, dq, 'g'); plt.ylabel("Vel (rad/s)"); plt.grid(True)
-    plt.subplot(4, 1, 3); plt.plot(t, ddq, 'r'); plt.ylabel("Acc (rad/s^2)"); plt.grid(True)
-    plt.subplot(4, 1, 4); plt.plot(t, stg, 'k'); plt.ylabel("Stage"); plt.grid(True)
+    plt.subplot(4, 1, 1); plt.plot(t, q, 'b'); plt.ylabel("Pos (rad)"); plt.title("Joint 5 Identification Trajectory")
+    plt.subplot(4, 1, 2); plt.plot(t, dq, 'g'); plt.ylabel("Vel (rad/s)")
+    plt.subplot(4, 1, 3); plt.plot(t, ddq, 'r'); plt.ylabel("Acc (rad/s^2)")
+    plt.subplot(4, 1, 4); plt.plot(t, stg, 'k'); plt.ylabel("Stage")
     plt.tight_layout()
-    plt.savefig("Data/Trajectory_Verification_Fixed.png")
-    plt.show()
+    plt.savefig("Data/Trajectory_Verification_Joint5.png")
+    print("[INFO] Plot saved to Data/Trajectory_Verification_Joint5.png")

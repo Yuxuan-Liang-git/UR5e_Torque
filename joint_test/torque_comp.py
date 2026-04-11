@@ -1,108 +1,148 @@
 #!/usr/bin/env python3
-"""UR5e Joint 6 Torque Control with Friction and Inertia Compensation.
-Uses identified parameters: J, B, Fc, bias.
+"""
+Generalized UR5e Multi-Joint Torque Compensation.
+Supports simultaneous compensation for multiple joints while locking others at q_home.
 """
 
-import argparse
 import time
-import sys
 import numpy as np
 import yaml
 from pathlib import Path
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="UR5e Joint6 Friction Compensation Control")
-    parser.add_argument("--robot-ip", default="192.168.56.101", help="UR robot IP")
-    parser.add_argument("--config", default="/home/amdt/ur_force_ws/my_ws/config/ctrl_config.yaml", help="Control config file")
-    return parser.parse_args()
+# ==========================================
+# 配置区
+JOINT_LIST  = [2, 3, 4, 5]  # 需要释放并补偿摩擦力的关节列表 (0-5)
+ROBOT_IP    = "192.168.56.101"
+COMP_FACTOR = 0.25        # 安全补偿系数 (0-1)
+# ==========================================
 
 def main():
-    args = parse_args()
-    try:
-        with open(args.config, 'r') as f:
-            ctrl_cfg = yaml.safe_load(f)
-        torque_limits = np.array(ctrl_cfg['safety']['torque_limits'])
-    except Exception as e:
-        print(f"[ERROR] Failed to load config: {e}")
+    print(f"[INFO] Initializing Compensation Mode for Joints: {JOINT_LIST}")
+    
+    print(f"[INFO] Connecting to robot {ROBOT_IP}...")
+    rtde_c = RTDEControlInterface(ROBOT_IP)
+    rtde_r = RTDEReceiveInterface(ROBOT_IP)
+    
+    # 1. 加载 q_home (来自 Ref.yaml)
+    ref_path = Path("Config/Ref.yaml")
+    if not ref_path.exists():
+        print(f"[ERROR] {ref_path} not found.")
         return
+    with open(ref_path, 'r') as f:
+        ref_cfg = yaml.safe_load(f)
+    q_home = np.array(ref_cfg.get("q_home", [1.5, -1.5, -1.5, -1.5, 0.0, 1.5]))
+    print(f"[INFO] Target Home Pose: {q_home}")
 
-    # 1. 加载辨识出来的参数
-    param_file = Path("Data/identified_params.yaml")
-    if param_file.exists():
-        print(f"[INFO] Loading parameters from {param_file}...")
-        with open(param_file, 'r') as f:
+    # 2. 批量加载辨识出来的摩擦力参数
+    joint_models = {}
+    for j_idx in JOINT_LIST:
+        param_path = Path(f"Config/joint_{j_idx}_param.yaml")
+        if not param_path.exists():
+            print(f"\n[ERROR] 找不到关节 {j_idx} 的辨识参数文件: {param_path}")
+            print(f"[ERROR] 请先运行 sys_iden.py 生成该文件后再启动控制。")
+            rtde_c.disconnect()
+            rtde_r.disconnect()
+            return
+
+        print(f"[INFO] Loading parameters for Joint {j_idx} from {param_path}...")
+        with open(param_path, 'r') as f:
             params = yaml.safe_load(f)
-        J_ID = params.get("J", 0.025780)
-        B_ID = params.get("B", 0.494677)
-        FC_ID = params.get("Fc", 0.371542)
-        BIAS_ID = params.get("bias", -0.022616)
-    else:
-        print(f"[WARN] {param_file} not found. Using default/hardcoded values.")
-        J_ID = 0.025780
-        B_ID = 0.494677
-        FC_ID = 0.371542
-        BIAS_ID = -0.022616
+        
+        S = params.get("Stribeck", {})
+        model = {
+            "B": S.get("B", 0.5),
+            "Fc": S.get("Fc", 0.5),
+            "Fs": S.get("Fs", 0.8),
+            "vs": S.get("vs", 0.05),
+            "bias": params.get("bias", 0.0)
+        }
+        joint_models[j_idx] = model
+        print(f"       -> Fc={model['Fc']:.4f}, B={model['B']:.4f}, Bias={model['bias']:.4f}")
 
-    print(f"辨识参数: J={J_ID:.6f}, B={B_ID:.6f}, Fc={FC_ID:.6f}, Bias={BIAS_ID:.6f}")
-
-    print(f"[INFO] Connecting to robot {args.robot_ip}")
-    rtde_c = RTDEControlInterface(args.robot_ip)
-    rtde_r = RTDEReceiveInterface(args.robot_ip)
-
-    q_init = np.array(rtde_r.getActualQ())
-    
-    # 锁死其他关节的 PD 参数 (Joints 1-5)
-    KP_LOCK = [1500.0, 1500.0, 1500.0, 300.0, 100.0]
-    KD_LOCK = [40.0, 40.0, 40.0, 10.0, 10.0]
-    
-    # 补偿策略参数 (Joint 6)
-    VEL_THRESHOLD = 0.01
-    
+    # 3. 控制参数
+    # 大关节 (0-2) 使用更强的锁定刚度，小关节 (3-5) 稍弱
+    KP_LOCK = [1500.0, 1500.0, 1500.0, 500.0, 400.0, 300.0]
+    KD_LOCK = [40.0, 40.0, 40.0, 15.0, 10.0, 8.0]
+    VEL_THRESHOLD = 0.01 
+    torque_limits = np.array([150, 150, 150, 40, 40, 40]) # 安全阈值
     dt = 0.002
-    start_time = time.perf_counter()
-    next_tick = start_time
 
-    print("[INFO] Pure Compensation Mode started (Joints 1-5 Locked). Press Ctrl+C to stop.")
+    # --- 阶段 1: 线性插值初始化 (5s) ---
+    print(f"[INFO] Starting 5s smooth initialization to q_home...")
+    q_start = np.array(rtde_r.getActualQ())
+    t_init = 5.0
+    start_time = time.perf_counter()
+    
+    while True:
+        t_loop = time.perf_counter() - start_time
+        if t_loop >= t_init: break
+        
+        q_curr = np.array(rtde_r.getActualQ())
+        dq_curr = np.array(rtde_r.getActualQd())
+        
+        # 线性插值计算当前时刻的目标位置
+        alpha = t_loop / t_init
+        q_target = q_start + (q_home - q_start) * alpha
+        
+        # 全轴 PD 控制锁定
+        tau_cmd = []
+        for i in range(6):
+            tau = KP_LOCK[i] * (q_target[i] - q_curr[i]) + KD_LOCK[i] * (0.0 - dq_curr[i])
+            tau_cmd.append(tau)
+        
+        tau_cmd = np.clip(tau_cmd, -torque_limits, torque_limits)
+        rtde_c.directTorque(tau_cmd.tolist())
+        time.sleep(dt)
+
+    # --- 阶段 2: 实时前馈补偿与 PD 锁死 ---
+    print(f"\n[INFO] Multi-Joint Compensation Mode ON.")
+    print(f"[INFO] Active Joints (Compensated): {JOINT_LIST}")
+    print(f"[INFO] Locked Joints: {[i for i in range(6) if i not in JOINT_LIST]}")
+    print("[INFO] Press Ctrl+C to exit.")
+    
     try:
         while True:
-            t_curr = time.perf_counter() - start_time
+            loop_start = time.perf_counter()
             q = np.array(rtde_r.getActualQ())
             dq = np.array(rtde_r.getActualQd())
             
-            # --- 阶段 1-5: 锁死逻辑 (PD 控制回 q_init) ---
-            tau_lock = []
-            for i in range(5):
-                t_i = KP_LOCK[i] * (q_init[i] - q[i]) + KD_LOCK[i] * (0.0 - dq[i])
-                tau_lock.append(t_i)
+            tau_cmd = [0.0] * 6
             
-            # --- 阶段 6: 纯前馈补偿逻辑 ---
-            if abs(dq[5]) > VEL_THRESHOLD:
-                fric_sign = np.sign(dq[5])
-            else:
-                fric_sign = dq[5] / VEL_THRESHOLD
-                
-            tau_fric = B_ID * dq[5] + FC_ID * fric_sign
-            tau_bias = BIAS_ID
-            tau_total_j6 = tau_fric + tau_bias
+            for i in range(6):
+                if i in JOINT_LIST:
+                    # 获取该轴的模型
+                    m = joint_models[i]
+                    v_i = dq[i]
+                    
+                    # 符号处理
+                    if abs(v_i) > VEL_THRESHOLD:
+                        fric_sign = np.sign(v_i)
+                    else:
+                        fric_sign = v_i / VEL_THRESHOLD
+                    
+                    # Stribeck 摩擦力模型
+                    stribeck = m['Fc'] + (m['Fs'] - m['Fc']) * np.exp(-(v_i/m['vs'])**2)
+                    tau_fric = stribeck * fric_sign + m['B'] * v_i
+                    
+                    # 综合补偿 (摩擦力 + 偏置)
+                    tau_cmd[i] = COMP_FACTOR * (tau_fric + m['bias'])
+                else:
+                    # 其余轴：PD 锁死在 q_home
+                    tau_cmd[i] = KP_LOCK[i] * (q_home[i] - q[i]) + KD_LOCK[i] * (0.0 - dq[i])
             
-            # 组合力矩指令 (增加一个 0.9 的系数以提高稳定性)
-            tau_cmd = tau_lock + [0.9 * tau_total_j6]
             tau_cmd = np.clip(tau_cmd, -torque_limits, torque_limits)
-
-            if t_curr > 0.1:
-                if not rtde_c.directTorque(tau_cmd.tolist(), True):
-                    break
             
-            # 维持频率
-            next_tick += dt
-            sleep_time = next_tick - time.perf_counter()
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            if not rtde_c.directTorque(tau_cmd.tolist(), True):
+                break
+                
+            elapsed = time.perf_counter() - loop_start
+            if elapsed < dt:
+                time.sleep(dt - elapsed)
 
     except KeyboardInterrupt:
-        print("\n[INFO] Interrupted by user.")
+        print("\n[INFO] Stopped by user.")
     finally:
         print("[INFO] Cleaning up...")
         rtde_c.stopScript()

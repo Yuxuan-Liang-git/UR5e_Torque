@@ -18,9 +18,24 @@ def main():
     print(f"[INFO] Connecting to robot {ROBOT_IP}...")
     rtde_c = RTDEControlInterface(ROBOT_IP)
     rtde_r = RTDEReceiveInterface(ROBOT_IP)
-    
-    q_start = np.array(rtde_r.getActualQ())
-    
+    # 1. 从 Ref.yaml 加载初始化姿态
+    ref_path = Path("Config/Ref.yaml")
+    if not ref_path.exists():
+        print(f"[ERROR] {ref_path} not found.")
+        return
+    with open(ref_path, 'r') as f:
+        ref_cfg = yaml.safe_load(f)
+    q_init_yaml = np.array(ref_cfg.get("q_init", [1.5, -1.5, -1.5, -1.5, 1.5, 0.0]))
+    print(f"[INFO] Loaded Q_INIT from Ref.yaml: {q_init_yaml}")
+
+    # 2. 预移动到初始姿态
+    q_actual = np.array(rtde_r.getActualQ())
+    dist = np.linalg.norm(q_actual - q_init_yaml)
+    if dist > 0.01:
+        print(f"[INFO] Moving to reference q_init (Dist={dist:.4f})...")
+        rtde_c.moveJ(q_init_yaml.tolist(), 0.4, 0.4) 
+        time.sleep(1.0)
+
     # 全局参数
     DURATION_PER_JOINT = 10.0 # 每个关节测试 10 秒
     FREQ = 0.5               # 测试频率
@@ -28,7 +43,7 @@ def main():
     
     # 激励幅值 (根据用户反馈调整)
     # 大关节建议至少 3.0-5.0Nm 以上才能观察到电流变化，1.5Nm 往往无法克服静摩擦
-    AMPS = [3.0, 5.0, 5.0, 1.5, 1.5, 1.0]
+    AMPS = [3.0, 5.0, 5.0, 0.5, 0.5, 0.5]
     
     kt_results = []
     config_path = Path("Config")
@@ -64,8 +79,8 @@ def main():
                 # 当前轴下发正弦力矩
                 tau_cmd = amp * np.sin(2 * np.pi * FREQ * t)
                 
-                # 控制混合
-                tau = kp * (q_start - q) - kd * dq
+                # 控制混合 (锁死非测试轴在 q_init_yaml)
+                tau = kp * (q_init_yaml - q) - kd * dq
                 tau[j_idx] = tau_cmd
                 
                 rtde_c.directTorque(tau.tolist(), True)
