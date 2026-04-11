@@ -1,8 +1,26 @@
 import numpy as np
 import mujoco
-from nmpc_controller_ur5e import mj2pin_pos, mj2pin_rot
+# from nmpc_controller_ur5e import mj2pin_pos, mj2pin_rot
 from acados_template import AcadosOcpSolver
 import yaml
+
+from export_model_ur5e import export_ur5e_model
+import casadi as ca
+from acados_template import AcadosOcp
+import os
+
+# ── Coordinate-transform constant ─────────────────────────────────────────────
+# Measured: R_pin = R_mj @ Rz90
+_Rz90 = np.array([[0., -1., 0.],
+                   [1.,  0., 0.],
+                   [0.,  0., 1.]])
+
+# MuJoCo position → Pinocchio position: [x,y,z]_mj → [y, -x, z]_pin
+def mj2pin_pos(p_mj: np.ndarray) -> np.ndarray:
+    return np.array([p_mj[1], -p_mj[0], p_mj[2]])
+
+def mj2pin_rot(R_mj: np.ndarray) -> np.ndarray:
+    return R_mj @ _Rz90
 
 class BaseController:
     """控制器基类，提供统一的任务空间控制接口"""
@@ -137,9 +155,13 @@ class ImpedanceController(BaseController):
         M_inv = np.linalg.inv(M_joint)
 
         # 3. 计算任务空间等效质量阵 Lambda = (J * M^-1 * J^T)^-1
-        # 注意: 实际计算中常用 Lambda * J * M^-1 来实现，或者直接求逆
         Lambda_inv = J @ M_inv @ J.T
         Lambda = np.linalg.inv(Lambda_inv + np.eye(6) * 1e-6) # 正则化
+
+        # print("[DEBUG] Task-Space Inertia Matrix (Lambda):")
+        # with np.printoptions(precision=5, suppress=True, formatter={'float': '{: 8.5f}'.format}):
+        #     print(Lambda)
+
 
         # 4. 阻抗行为 a_ref
         # 标准阻抗方程: M_m * dd_x + D * d_x + K * x = F_ext
@@ -148,22 +170,6 @@ class ImpedanceController(BaseController):
 
         # 5. 计算任务空间力 (这里由于 UR 自带重力补偿和摩擦补偿，我们主要关注惯性解耦)
         self.F_task = Lambda @ a_ref
-
-        # # 6. 速度限制惩罚 (同 PD 控制器)
-        # if self.vel_limits is not None:
-        #     v_trans = v_ee[:3]
-        #     v_max_trans = np.min(self.vel_limits[:3])
-        #     speed_trans = np.linalg.norm(v_trans)
-        #     if speed_trans > v_max_trans:
-        #         print(f"[WARN] Translational velocity limit exceeded: {speed_trans:.2f} > {v_max_trans:.2f}")
-        #         self.F_task[:3] -= 200.0 * (speed_trans - v_max_trans) * (v_trans / speed_trans)
-            
-        #     v_rot = v_ee[3:]
-        #     v_max_rot = np.min(self.vel_limits[3:])
-        #     speed_rot = np.linalg.norm(v_rot)
-        #     if speed_rot > v_max_rot:
-        #         print(f"[WARN] Rotational velocity limit exceeded: {speed_rot:.2f} > {v_max_rot:.2f}")
-        #         self.F_task[3:] -= 50.0 * (speed_rot - v_max_rot) * (v_rot / speed_rot)
 
         # 7. 映射回关节力矩
         tau = J.T @ self.F_task
@@ -209,27 +215,19 @@ class NMPCController(BaseController):
         self.torque_limits = np.array(nmpc_cfg.get("torque_limits", [150, 150, 150, 28, 28, 28]))
 
         # 2. 导出模型并获取运动学函数
-        from export_model_ur5e import export_ur5e_model
-        import casadi as ca
-        from acados_template import AcadosOcp
-        import os
-        
         acados_model, f_fk_pos, f_fk_rot, nq, nv = export_ur5e_model()
         self.nx = nq + nv
         self.nu = nq
 
         # 获取权重并计算对角矩阵
-        w_pos = nmpc_cfg["weight_pos"]
-        w_ori = nmpc_cfg["weight_ori"]
+        w_q = nmpc_cfg["weight_q"]
         w_vel = nmpc_cfg["weight_vel"]
         w_tau = nmpc_cfg["weight_tau"]
         
-        W_diag = np.array(list(w_pos) + list(w_ori) + [w_vel] * 6 + list(w_tau))
+        W_diag = np.array(list(w_q) + list(w_vel) + list(w_tau))
         W_diag = np.maximum(W_diag, 1e-6)
-        terminal_pos_scale = float(nmpc_cfg.get("terminal_pos_scale", 10.0))
-        terminal_ori_scale = float(nmpc_cfg.get("terminal_ori_scale", 10.0))
-        W_e_diag = np.array(list(np.array(w_pos, dtype=float) * terminal_pos_scale) +
-                    list(np.array(w_ori, dtype=float) * terminal_ori_scale))
+        terminal_q_scale = float(nmpc_cfg.get("terminal_q_scale", 10.0))
+        W_e_diag = np.array(list(np.array(w_q, dtype=float) * terminal_q_scale))
         W_e_diag = np.maximum(W_e_diag, 1e-6)
         
         W_mat = np.diag(W_diag)
@@ -244,28 +242,18 @@ class NMPCController(BaseController):
             q_sym = x_sym[:nq]
             v_sym = x_sym[nq:]
 
-            # 参数 p: [ref_pos(3), ref_rot(9)]
+            # 参数 p: [ref_q(6), ref_dq(6)]
             p_sym = ca.SX.sym("p", 12)
-            ref_pos = p_sym[:3]
-            ref_rot = ca.reshape(p_sym[3:12], 3, 3)
+            ref_q = p_sym[:6]
+            ref_dq = p_sym[6:12]
             acados_model.p = p_sym
 
-            # 计算残差 (NONLINEAR_LS)
-            ee_pos = f_fk_pos(q_sym)
-            res_pos = ee_pos - ref_pos
-
-            ee_rot = f_fk_rot(q_sym)
-            R_err = ca.mtimes(ref_rot.T, ee_rot)
-            tr = R_err[0,0] + R_err[1,1] + R_err[2,2]
-            cos_th = ca.fmin(ca.fmax((tr - 1.0) / 2.0, -1.0 + 1e-6), 1.0 - 1e-6)
-            theta = ca.acos(cos_th)
-            coeff = theta / (2.0 * ca.sin(theta) + 1e-9)
-            res_ori = coeff * ca.vertcat(R_err[2,1] - R_err[1,2],
-                                         R_err[0,2] - R_err[2,0],
-                                         R_err[1,0] - R_err[0,1])
+            # 直接计算关节空间的误差残差
+            res_q = q_sym - ref_q
+            res_v = v_sym - ref_dq
             
-            res_stage = ca.vertcat(res_pos, res_ori, v_sym, u_sym) # 3+3+6+6=18
-            res_terminal = ca.vertcat(res_pos, res_ori)           # 6
+            res_stage = ca.vertcat(res_q, res_v, u_sym) # 6+6+6=18维
+            res_terminal = ca.vertcat(res_q)           # 6维
 
             ocp = AcadosOcp()
             ocp.model = acados_model
@@ -329,36 +317,39 @@ class NMPCController(BaseController):
                 pass
 
 
-    def compute_torque(self, data, q, dq, ref_pos_batch, ref_rot_batch):
+    def compute_torque(self, data, q, dq, ref_q_batch, ref_dq_batch):
         """
         计算 NMPC 力矩。
-        ref_pos_batch: [3, N+1] 参考位置序列 (MuJoCo 坐标系)
-        ref_rot_batch: [9, N+1] 参考旋转矩阵序列 (MuJoCo 坐标系)
+        ref_q_batch: [6, N+1] 参考关节位置序列
+        ref_dq_batch: [6, N+1] 参考关节速度序列
         """
         # 1. 状态
         x0 = np.concatenate([q, dq])
         self.solver.set(0, "lbx", x0)
         self.solver.set(0, "ubx", x0)
 
-        # 2. 设置参数 p 而非 yref (同步 nmpc_controller_ur5e.py 的逻辑)
+        # 2. 设置参数 p 为关节空间参考序列
         for k in range(self.N + 1):
-            p_pin = mj2pin_pos(ref_pos_batch[:, k])
-            R_mj = ref_rot_batch[:, k].reshape(3, 3, order='F')
-            R_pin = mj2pin_rot(R_mj)
-            
-            p_k = np.concatenate([p_pin, R_pin.flatten(order='F')])
+            p_k = np.concatenate([ref_q_batch[:, k], ref_dq_batch[:, k]])
             self.solver.set(k, "p", p_k)
             
             # 由于使用的是非线性 LS 且残差在 cost_y_expr 中减去了参考，这里 yref 设为 0
             ny = 18 if k < self.N else 6
             self.solver.set(k, "yref", np.zeros(ny))
 
-        # 3. 求解
         status = self.solver.solve()
+        
+        # 1. 提取第 0 步的最优前馈力矩
         u_nmpc = self.solver.get(0, "u")
         
-        # 4. 限幅与重力补偿
-        u_nmpc = np.clip(u_nmpc, -self.torque_limits, self.torque_limits)
-        tau_nmpc = u_nmpc - data.qfrc_bias[:6]
+        # 2. 提取第 1 步的预测期望状态
+        x_next = self.solver.get(1, "x") 
+        q_nmpc_des = x_next[:6]
+        dq_nmpc_des = x_next[6:]
         
-        return np.asarray(tau_nmpc).flatten()
+        # 3. 力矩限幅与重力扣除
+        u_nmpc = np.clip(u_nmpc, -self.torque_limits, self.torque_limits)
+        tau_nmpc_ff = u_nmpc - data.qfrc_bias[:6]
+        
+        # 返回前馈力矩、期望位置、期望速度
+        return np.asarray(tau_nmpc_ff).flatten(), q_nmpc_des, dq_nmpc_des

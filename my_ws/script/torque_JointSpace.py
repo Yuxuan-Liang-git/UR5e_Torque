@@ -26,9 +26,9 @@ VIS_FREQ = 50.0
 
 def get_traj_pos(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> np.ndarray:
     return x_des_pos_init + np.array([
-        2.0 * circle_radius * np.sin(circle_omega * t),
-        circle_radius * np.sin(2.0 * circle_omega * t),
-        0.0,
+        - 2.0 * circle_radius * (np.cos(circle_omega * t) - 1.0),
+        1.0 * circle_radius * np.sin(2.0 * circle_omega * t),
+        - 0.5 * circle_radius * (np.cos(circle_omega * t) - 1.0),
     ])
 
 
@@ -298,7 +298,7 @@ def main():
             tau = joint_controller.compute_torque(q_des, q, dq_des, dq)
 
             if t_now > STABILIZE_END:
-                ok = rtde_c.directTorque(tau.tolist(), True)
+                ok = rtde_c.directTorque(tau.tolist(), False)
                 if not ok:
                     print("[ERROR] directTorque failed")
                     break

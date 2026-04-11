@@ -16,7 +16,7 @@ echo "--- Activating environment from $VENV_PATH ---"
 . "$VENV_PATH/bin/activate"
 
 # 运行 Python 脚本
-echo "--- Starting vis.py ---"
+echo "--- Starting vis_ur5e_gripper.py ---"
 cd "$SCRIPT_DIR"
 # 可以通过 $@ 传递参数，如 ./run_vis.sh --robot-ip 192.168.56.101
-python3 vis.py "$@"
+python3 vis_ur5e_gripper.py "$@"

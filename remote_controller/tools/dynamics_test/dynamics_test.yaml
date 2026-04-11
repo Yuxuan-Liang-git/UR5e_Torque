@@ -1,0 +1,61 @@
+# Mockway Robot - Real-time Torque Compensation Configuration
+# 实时力矩补偿控制系统配置文件
+
+# CAN 通信配置
+can:
+  port: "/dev/ttyACM0"                # CAN适配器串口号 (Windows: COMx, Linux: /dev/ttyUSBx)
+  serial_baudrate: 921600     # 串口波特率（USB-CAN适配器通信）
+  can_baudrate: 1000000       # CAN总线波特率
+
+# 电机配置列表（支持多个电机）
+motors:
+  - id: 1                                    # 电机 CAN ID
+    type: "DM_J4310_2EC"                    # 电机型号
+    master_id: 0                            # 主机ID（反馈帧ID）
+    direction: 1                            # 旋转方向: 1=正向(与关节同向), -1=反向(与关节反向)
+    description: "Joint 1 - Shoulder"       # 电机描述（可选）
+
+  - id: 2
+    type: "DM4340"
+    master_id: 0
+    direction: 1                            # 旋转方向: 1=正向(与关节同向), -1=反向(与关节反向)
+    description: "Joint 2 - Elbow"
+
+  - id: 3
+    type: "DM4340"
+    master_id: 0
+    direction: -1                           # 旋转方向: 1=正向(与关节同向), -1=反向(与关节反向)
+    description: "Joint 3 - Forearm"
+
+  - id: 4
+    type: "DM_J4310_2EC"
+    master_id: 0
+    direction: 1                            # 旋转方向: 1=正向(与关节同向), -1=反向(与关节反向)
+    description: "Joint 4 - Wrist Pitch"
+
+  - id: 5
+    type: "DM_J4310_2EC"
+    master_id: 0
+    direction: 1                            # 旋转方向: 1=正向(与关节同向), -1=反向(与关节反向)
+    description: "Joint 5 - Wrist Roll"
+
+  - id: 6
+    type: "DM_J4310_2EC"
+    master_id: 0
+    direction: 1                            # 旋转方向: 1=正向(与关节同向), -1=反向(与关节反向)
+    description: "Joint 6 - Wrist Yaw"
+
+# 控制参数
+control:
+  rate: 200                          # 控制频率 (Hz)
+  compensation_mode: "gravity"       # 补偿模式: "gravity", "full_dynamics", "none"
+
+  # MIT控制参数
+  mit_params:
+    kp: 0.0                          # 位置增益（纯力矩控制时设为0）
+    kd: 0.0                          # 阻尼增益
+
+# 日志配置
+logging:
+  print_status_interval: 0.5         # 状态打印间隔（秒）
+  verbose: false                     # 详细输出模式

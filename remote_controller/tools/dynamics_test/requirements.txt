@@ -1,0 +1,16 @@
+# Python dependencies for Mockway Inverse Dynamics Testing
+
+# Core robotics library for dynamics computation
+pin>=3.0.0
+
+# Numerical computing
+numpy>=1.20.0
+
+# Visualization
+matplotlib>=3.3.0
+
+# Serial communication for motor control (required for realtime_torque_compensation.py)
+pyserial>=3.5
+
+# Configuration file parsing (YAML support)
+pyyaml>=6.0

@@ -292,6 +292,7 @@ def main():
             x_curr_mat = data.site_xmat[ee_site_id].reshape(3, 3).copy()
 
             tau_nmpc = np.zeros(6)
+            tau_pd_fb = np.zeros(6)
 
             if t_now <= STABILIZE_END:
                 x_des_pos = x_curr_pos.copy()
@@ -348,8 +349,9 @@ def main():
                     dt,
                 )
 
-                tau_nmpc = nmpc_controller.compute_torque(data, q, dq, ref_q_batch, ref_dq_batch)
+                tau_nmpc, q_nmpc_des, dq_nmpc_des = nmpc_controller.compute_torque(data, q, dq, ref_q_batch, ref_dq_batch)
 
+                tau_pd_fb = joint_controller.compute_torque(q_nmpc_des, q, dq_nmpc_des, dq)
                 # =============================================================
                 # PD 跟随同一个关节空间目标（来自 IK 参考），保证混合控制一致
                 # =============================================================
@@ -364,12 +366,14 @@ def main():
             # =================================================================
             if traj_started:
                 # tau = np.concatenate([tau_pd[:3], tau_nmpc[3:]])
-                tau = tau_nmpc
+
+                tau = tau_nmpc + 0.5 * tau_pd_fb 
+                # tau = tau_pd
             else:
                 tau = tau_pd
 
             if t_now > STABILIZE_END:
-                ok = rtde_c.directTorque(tau.tolist(), True)
+                ok = rtde_c.directTorque(tau.tolist(), False)
                 if not ok:
                     print("[ERROR] directTorque failed")
                     break
@@ -385,6 +389,7 @@ def main():
                 extra={
                     "tau_cmd": tau,
                     "tau_pd": tau_pd,
+                    "tau_pd_fb": tau_pd_fb,
                     "tau_nmpc": tau_nmpc,
                     "traj_started": float(traj_started),
                 },

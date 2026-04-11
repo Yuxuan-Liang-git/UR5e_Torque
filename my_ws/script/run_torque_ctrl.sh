@@ -19,4 +19,4 @@ echo "--- Activating environment from $VENV_PATH ---"
 
 echo "--- Starting ---"
 cd "$SCRIPT_DIR"
-python3 grav_comp.py "$@"
+python3 torque_ctrl.py "$@"
