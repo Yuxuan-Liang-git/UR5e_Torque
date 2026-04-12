@@ -15,9 +15,8 @@ def lowpass_filter(data, cutoff=7, fs=500, order=4):
     if len(data) <= 3 * max(len(a), len(b)): return data
     return filtfilt(b, a, data)
 
-# ==========================================
-# 配置区
-JOINT_ACT = 1  # 要辨识的轴编号 (0-5)
+JOINT_ACT = 0  # 要辨识的轴编号 (0-5)
+CONFIG_PATH = "Config/Ref.yaml"
 # ==========================================
 
 # 1. 加载数据
@@ -29,6 +28,12 @@ if not Path(data_path).exists():
 print(f"正在读取数据: {data_path}...")
 df = pd.read_csv(data_path)
 
+# 加载配置以获取 q_init
+with open(CONFIG_PATH, 'r') as f:
+    ref_cfg = yaml.safe_load(f)
+    q_init_all = np.array(ref_cfg.get("q_init", [0, -1.57, 0, -1.57, 0, 0]))
+    q_init_val = q_init_all[JOINT_ACT]
+
 t = df['time'].values
 q = df['q_act'].values
 dq_raw = df['dq_act'].values
@@ -39,6 +44,7 @@ print("[INFO] 正在对实际速度进行数值微分以获取加速度...")
 ddq_raw = np.gradient(dq_raw, t)
 tau_raw = df['torque'].values
 stage = df['stage'].values
+dq_step_raw = df['dq_step'].values # 实测名义速度
 
 # --- 2. 预处理 (滤波) ---
 print("[INFO] 正在执行数据滤波 (针对数值微分产生的噪声进行强化处理)...")
@@ -59,38 +65,70 @@ if np.any(mask_s1):
     tau_s1 = tau[mask_s1]
     q_s1 = q[mask_s1]
     ddq_s1 = ddq[mask_s1]
+    dq_step_s1 = dq_step_raw[mask_s1]
 
     # 自适应计算核心探测区
     q_mid = (np.max(q_s1) + np.min(q_s1)) / 2.0
     q_range = np.max(q_s1) - np.min(q_s1)
     q_semi_width = q_range * 0.25 
     
-    # --- 改进逻辑：回归实测速度聚类，避免滞后引起的惯性矩污染 ---
-
-    unique_vs = np.unique(np.round(np.abs(dq_s1), 1))
-    unique_vs = unique_vs[unique_vs > 0.2] 
+    unique_vs = np.unique(np.abs(dq_step_s1))
     
-    print(f"\n[Stage 1] 正在进行 Joint {JOINT_ACT} 摩擦力对冲提取 (基于实测速度聚类)...")
+    print(f"\n[Stage 1] 正在进行 Joint {JOINT_ACT} 摩擦力对冲提取 (基于相对位置 q_rel 镜像匹配)...")
     
     fric_data = [] 
-    ACC_THRESHOLD = 0.2
+    ACC_THRESHOLD = 2.0
     
     for v_target in unique_vs:
-        # 使用实测速度匹配，确保机械臂真实达到了该转速
-        v_mask = (np.abs(np.abs(dq_s1) - v_target) < 0.05)
-        # 核心区域：收窄空间掩码，确保在匀速段
-        q_core_mask = (np.abs(q_s1 - q_mid) < (q_range * 0.2)) 
-        acc_mask = (np.abs(ddq_s1) < ACC_THRESHOLD)
+        # 在名义档位内筛选
+        mask_v_nominal = (dq_step_s1 == v_target)
         
-        mask_pos = v_mask & q_core_mask & acc_mask & (dq_s1 > 0)
-        mask_neg = v_mask & q_core_mask & acc_mask & (dq_s1 < 0)
+        # 提取当前档位的有效数据
+        df_v = pd.DataFrame({
+            'q_rel': q_s1[mask_v_nominal] - q_init_val,
+            'dq': dq_s1[mask_v_nominal],
+            'tau': tau_s1[mask_v_nominal],
+            'ddq': ddq_s1[mask_v_nominal]
+        })
         
-        if np.any(mask_pos) and np.any(mask_neg):
-            tau_pos_avg = np.mean(tau_s1[mask_pos])
-            tau_neg_avg = np.mean(tau_s1[mask_neg])
-            tf = (tau_pos_avg - tau_neg_avg) / 2.0
+        # 滤波：稳态转速 + 低加速度
+        v_eps = 0.15
+        df_pos = df_v[(df_v['dq'] > (v_target - v_eps)) & (df_v['dq'] < (v_target + v_eps)) & (np.abs(df_v['ddq']) < ACC_THRESHOLD)]
+        df_neg = df_v[(df_v['dq'] > (-v_target - v_eps)) & (df_v['dq'] < (-v_target + v_eps)) & (np.abs(df_v['ddq']) < ACC_THRESHOLD)]
+        
+        def extract_friction_mirrored(df_sub):
+            if len(df_sub) < 10: return None
+            # 将 q_rel 划分为细小的正负对称区间进行对冲
+            # 例如划分为 20 个 bin，寻找镜像存在的 pair
+            rk_max = np.max(np.abs(df_sub['q_rel']))
+            bins = np.linspace(0, rk_max, 20)
+            obs = []
+            for i in range(len(bins)-1):
+                q_min, q_max = bins[i], bins[i+1]
+                # 寻找正位置点和负位置点
+                mask_p = (df_sub['q_rel'] >= q_min) & (df_sub['q_rel'] < q_max)
+                mask_n = (df_sub['q_rel'] <= -q_min) & (df_sub['q_rel'] > -q_max)
+                if np.any(mask_p) and np.any(mask_n):
+                    tau_p = df_sub.loc[mask_p, 'tau'].mean()
+                    tau_n = df_sub.loc[mask_n, 'tau'].mean()
+                    # (tau_p + tau_n) / 2 = 摩擦力 (假设重力项大小相等方向相反)
+                    obs.append((tau_p + tau_n) / 2.0)
+            return np.mean(obs) if obs else None
+
+        f_pos = extract_friction_mirrored(df_pos)
+        f_neg = extract_friction_mirrored(df_neg)
+        
+        if f_pos is not None and f_neg is not None:
+            # 最终摩擦力观测值：(f_pos - f_neg) / 2
+            tf = (f_pos - f_neg) / 2.0
             fric_data.append([v_target, tf])
-            print(f"  [V={v_target:.2f}] 样本: {np.sum(mask_pos)+np.sum(mask_neg):<5} | tau_f={tf:7.4f}")
+            print(f"  [V={v_target:.2f}] 镜像对冲观察值: {tf:7.4f} (基于 {len(df_pos)+len(df_neg)} 样本)")
+        elif f_pos is not None:
+             fric_data.append([v_target, f_pos])
+             print(f"  [V={v_target:.2f}] 单向对冲观察值: {f_pos:7.4f} (只获取到正向数据)")
+        elif f_neg is not None:
+             fric_data.append([v_target, -f_neg])
+             print(f"  [V={v_target:.2f}] 单向对冲观察值: {-f_neg:7.4f} (只获取到负向数据)")
             
     fric_points = np.array(fric_data)
     if len(fric_points) > 0:
@@ -101,7 +139,7 @@ if np.any(mask_s1):
             # 参考历史版本收紧边界: Fc/Fs 不应超过 2.0 (针对小关节)
             popt, _ = curve_fit(stribeck_fit_func, fric_points[:, 0], fric_points[:, 1], 
                                  p0=[0.5, 0.1, 0.05, 0.6], 
-                                 bounds=([0,0,0.005,0], [40.0, 8.0, 3.0, 10.0]))
+                                 bounds=([0,0,0.005,0], [40.0, 5.0, 3.0, 10.0]))
             Fc_id, B_id, vs_id, Fs_id = popt
             print(f"\n辨识完成 (Joint {JOINT_ACT}): Fs={Fs_id:.4f}, Fc={Fc_id:.4f}, B={B_id:.4f}, vs={vs_id:.4f}")
         except Exception as e:

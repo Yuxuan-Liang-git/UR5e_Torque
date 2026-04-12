@@ -16,7 +16,7 @@ from get_ref import generate_trajectory
 
 # ==========================================
 # 配置区
-JOINT_ACT = 1  # 0-5 (0: Base, 5: Wrist 3)
+JOINT_ACT = 0  # 0-5 (0: Base, 5: Wrist 3)
 ROBOT_IP  = "192.168.56.101"
 # ==========================================
 
@@ -46,7 +46,7 @@ def main():
     
     # 3. 生成参考轨迹 (以此 q_init 为基准)
     print(f"[INFO] Generating trajectory for Joint {JOINT_ACT}...")
-    t_vec, q_ref_vec, dq_ref_vec, ddq_ref_vec, stage_vec = generate_trajectory(
+    t_vec, q_ref_vec, dq_ref_vec, ddq_ref_vec, stage_vec, dq_step_vec = generate_trajectory(
         joint_idx=joint_idx, 
         q_init_act=q_init_yaml[joint_idx]
     )
@@ -109,7 +109,8 @@ def main():
                 dq_ref_vec[i], dq_act[joint_idx], 
                 ddq_ref_vec[i], 
                 tau_act[joint_idx], 
-                stage_vec[i]
+                stage_vec[i],
+                dq_step_vec[i]
             ]
             data_log.append(item)
             
@@ -155,7 +156,7 @@ def main():
         rtde_r.disconnect()
         
         if data_log:
-            df = pd.DataFrame(data_log, columns=['time', 'q_des', 'q_act', 'dq_des', 'dq_act', 'ddq_des', 'torque', 'stage'])
+            df = pd.DataFrame(data_log, columns=['time', 'q_des', 'q_act', 'dq_des', 'dq_act', 'ddq_des', 'torque', 'stage', 'dq_step'])
             output_dir = Path("Data")
             output_dir.mkdir(exist_ok=True)
             output_path = output_dir / f"Data_Joint_{JOINT_ACT}.csv"

@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 import yaml
 from pathlib import Path
 
+JOINT_ACT = 0
+
 def generate_trajectory(joint_idx=5, q_init_act=0.0, config_path="Config/Ref.yaml"):
     """
     Generate trajectory for a specific joint.
@@ -46,112 +48,133 @@ def generate_trajectory(joint_idx=5, q_init_act=0.0, config_path="Config/Ref.yam
     dt = 0.002
     
     # --- 动态计算总时长 ---
-    T_INIT_MOVE = 5.0
+    T_CV_TARGET = 0.5 # 期望稳速运行 1.0 秒
     T_SCAN = 0.0
-    for vk in V_SCAN_STEPS:
+    for vk_req in V_SCAN_STEPS:
+        # 核心公式: 2*R = v^2/a + v * T_cv => R = 0.5*(v^2/a + v*T_cv)
+        rk_calc = 0.5 * (vk_req**2 / MAX_ACC + vk_req * T_CV_TARGET)
+        rk = min(rk_calc, SCAN_RANGE) # 不超过配置的最大行程
+        
+        vk = vk_req
+        if (vk**2 / MAX_ACC) > rk:
+            vk = np.sqrt(rk * MAX_ACC)
+        
         ta = vk / MAX_ACC
-        tc = (2 * SCAN_RANGE) / vk - ta
-        if tc < 0:
-            tc = 0
-            ta = np.sqrt(2 * SCAN_RANGE / MAX_ACC)
-        T_SCAN += 2 * (2 * ta + tc)
-    T_MOVE_TO_ZERO = 3.0
+        d_half = ta + rk / vk 
+        d_full = ta + (2 * rk) / vk 
+        T_SCAN += d_half + d_full + d_full + d_full + d_half
     
-    T_TOTAL = T_INIT_MOVE + T_SCAN + T_MOVE_TO_ZERO + T_FOURIER + 0.5 
+    T_TOTAL = T_SCAN + T_FOURIER + 0.5 
     time_vec = np.arange(0, T_TOTAL, dt)
     
-    q_out = []
-    dq_out = []
-    ddq_out = []
-    stage_out = []
+    q_out, dq_out, ddq_out, stage_out, dq_step_out = [], [], [], [], []
     
     # 状态机变量
     stage = 0
     v_idx = 0
-    sub_stage = "INIT_MOVE"
+    # sub_cycle_idx: 0: 0->-R, 1: -R->+R, 2: +R->-R, 3: -R->+R, 4: +R->0
+    sub_cycle_idx = 0 
+    sub_stage = "SCAN_CYCLE"
     t_sub_start = 0.0
     q_curr_ref = q_init_act
     
-    def get_smooth_move(t_sub, q_start, q_end, duration):
-        if t_sub >= duration: return q_end, 0.0, 0.0
-        alpha = t_sub / duration
-        s = 10*alpha**3 - 15*alpha**4 + 6*alpha**5
-        ds = (30*alpha**2 - 60*alpha**3 + 30*alpha**4) / duration
-        dds = (60*alpha - 180*alpha**2 + 120*alpha**3) / (duration**2)
-        q = q_start + (q_end - q_start) * s
-        dq = (q_end - q_start) * ds
-        ddq = (q_end - q_start) * dds
-        return q, dq, ddq
-
     for t_curr in time_vec:
         q_ref, dq_ref, ddq_ref = q_curr_ref, 0.0, 0.0
+        dq_step = 0.0
         t_in_sub = t_curr - t_sub_start
         
-        if sub_stage == "INIT_MOVE":
-            stage = 0
-            # 目标位置改为 q_init_act - SCAN_RANGE
-            q_ref, dq_ref, ddq_ref = get_smooth_move(t_in_sub, q_init_act, q_init_act - SCAN_RANGE, 5.0)
-            if t_in_sub >= 5.0:
-                sub_stage = "SCAN_CYCLE"
-                t_sub_start = t_curr
-        
-        elif sub_stage == "SCAN_CYCLE":
+        if sub_stage == "SCAN_CYCLE":
             stage = 1
-            vk = V_SCAN_STEPS[v_idx]
+            vk_req = V_SCAN_STEPS[v_idx]
+            # 核心公式: 2*R = v^2/a + v * T_cv => R = 0.5*(v^2/a + v*T_cv)
+            rk_calc = 0.5 * (vk_req**2 / MAX_ACC + 1.0 * vk_req) # T_CV_TARGET = 1.0
+            rk = min(rk_calc, SCAN_RANGE)
+            
+            vk = vk_req
+            if (vk**2 / MAX_ACC) > rk:
+                vk = np.sqrt(rk * MAX_ACC)
+            
+            dq_step = vk_req # 记录名义目标值
             ta = vk / MAX_ACC
-            tc = (2 * SCAN_RANGE) / vk - ta
-            if tc < 0:
-                tc = 0
-                ta = np.sqrt(2 * SCAN_RANGE / MAX_ACC)
-                vk = MAX_ACC * ta
-                
-            dur = 2 * (2 * ta + tc)
-            t_in = t_in_sub
-            
-            # 在 [q_init_act - SCAN_RANGE, q_init_act + SCAN_RANGE] 之间摆动
-            if t_in < ta: # 正向加速
-                dq_ref = (vk / ta) * t_in
-                q_ref = (q_init_act - SCAN_RANGE) + 0.5 * (vk / ta) * t_in**2
-                ddq_ref = vk / ta
-            elif t_in < ta + tc: # 正向匀速
-                dq_ref = vk
-                q_ref = (q_init_act - SCAN_RANGE + 0.5 * vk * ta) + vk * (t_in - ta)
-                ddq_ref = 0.0
-            elif t_in < 2 * ta + tc: # 正向减速
-                t_dec = t_in - (ta + tc)
-                dq_ref = vk - (vk / ta) * t_dec
-                q_ref = (q_init_act + SCAN_RANGE - 0.5 * vk * ta) + vk * t_dec - 0.5 * (vk / ta) * t_dec**2
-                ddq_ref = -vk / ta
-            elif t_in < 3 * ta + tc: # 反向加速
-                t_acc_rev = t_in - (2 * ta + tc)
-                dq_ref = -(vk / ta) * t_acc_rev
-                q_ref = (q_init_act + SCAN_RANGE) - 0.5 * (vk / ta) * t_acc_rev**2
-                ddq_ref = -vk / ta
-            elif t_in < 3 * ta + 2 * tc: # 反向匀速
-                dq_ref = -vk
-                q_ref = (q_init_act + SCAN_RANGE - 0.5 * vk * ta) - vk * (t_in - (3 * ta + tc))
-                ddq_ref = 0.0
-            elif t_in < dur: # 反向减速
-                t_dec_rev = t_in - (3 * ta + 2 * tc)
-                dq_ref = -vk + (vk / ta) * t_dec_rev
-                q_ref = (q_init_act - SCAN_RANGE + 0.5 * vk * ta) - vk * t_dec_rev + 0.5 * (vk / ta) * t_dec_rev**2
-                ddq_ref = vk / ta
-            
-            if t_in >= dur:
-                v_idx += 1
-                t_sub_start = t_curr
-                if v_idx >= len(V_SCAN_STEPS):
-                    sub_stage = "MOVE_TO_ZERO"
+            d_h = ta + rk / vk
+            d_f = ta + (2 * rk) / vk
+            dur_list = [d_h, d_f, d_f, d_f, d_h]
+            dur = dur_list[sub_cycle_idx]
+
+            if sub_cycle_idx == 0: # 0 -> -R
+                tc = d_h - 2*ta
+                if t_in_sub < ta:
+                    dq_ref = -(vk/ta) * t_in_sub
+                    q_ref = q_init_act - 0.5*(vk/ta)*t_in_sub**2
+                    ddq_ref = -vk/ta
+                elif t_in_sub < ta + tc:
+                    dq_ref = -vk
+                    q_ref = (q_init_act - 0.5*vk*ta) - vk*(t_in_sub - ta)
+                    ddq_ref = 0.0
                 else:
-                    sub_stage = "SCAN_CYCLE"
-        
-        elif sub_stage == "MOVE_TO_ZERO":
-            stage = 1.5
-            # 回到 q_init_act
-            q_ref, dq_ref, ddq_ref = get_smooth_move(t_in_sub, q_init_act - SCAN_RANGE, q_init_act, 3.0)
-            if t_in_sub >= 3.0:
-                sub_stage = "FOURIER"
+                    t_dec = t_in_sub - (ta + tc)
+                    dq_ref = -vk + (vk/ta)*t_dec
+                    q_ref = (q_init_act - rk + 0.5*vk*ta) - vk*t_dec + 0.5*(vk/ta)*t_dec**2
+                    ddq_ref = vk/ta
+            
+            elif sub_cycle_idx in [1, 3]: # -R -> +R
+                tc = d_f - 2*ta
+                if t_in_sub < ta:
+                    dq_ref = (vk/ta) * t_in_sub
+                    q_ref = (q_init_act - rk) + 0.5*(vk/ta)*t_in_sub**2
+                    ddq_ref = vk/ta
+                elif t_in_sub < ta + tc:
+                    dq_ref = vk
+                    q_ref = (q_init_act - rk + 0.5*vk*ta) + vk*(t_in_sub - ta)
+                    ddq_ref = 0.0
+                else:
+                    t_dec = t_in_sub - (ta + tc)
+                    dq_ref = vk - (vk/ta)*t_dec
+                    q_ref = (q_init_act + rk - 0.5*vk*ta) + vk*t_dec - 0.5*(vk/ta)*t_dec**2
+                    ddq_ref = -vk/ta
+            
+            elif sub_cycle_idx == 2: # +R -> -R
+                tc = d_f - 2*ta
+                if t_in_sub < ta:
+                    dq_ref = -(vk/ta) * t_in_sub
+                    q_ref = (q_init_act + rk) - 0.5*(vk/ta)*t_in_sub**2
+                    ddq_ref = -vk/ta
+                elif t_in_sub < ta + tc:
+                    dq_ref = -vk
+                    q_ref = (q_init_act + rk - 0.5*vk*ta) - vk*(t_in_sub - ta)
+                    ddq_ref = 0.0
+                else:
+                    t_dec = t_in_sub - (ta + tc)
+                    dq_ref = -vk + (vk/ta)*t_dec
+                    q_ref = (q_init_act - rk + 0.5*vk*ta) - vk*t_dec + 0.5*(vk/ta)*t_dec**2
+                    ddq_ref = vk/ta
+            
+            else: # 4: +R -> 0
+                tc = d_h - 2*ta
+                if t_in_sub < ta:
+                    dq_ref = -(vk/ta) * t_in_sub
+                    q_ref = (q_init_act + rk) - 0.5*(vk/ta)*t_in_sub**2
+                    ddq_ref = -vk/ta
+                elif t_in_sub < ta + tc:
+                    dq_ref = -vk
+                    q_ref = (q_init_act + rk - 0.5*vk*ta) - vk*(t_in_sub - ta)
+                    ddq_ref = 0.0
+                else:
+                    t_dec = t_in_sub - (ta + tc)
+                    dq_ref = -vk + (vk/ta)*t_dec
+                    q_ref = (q_init_act + 0.5*vk*ta) - vk*t_dec + 0.5*(vk/ta)*t_dec**2
+                    ddq_ref = vk/ta
+
+            if t_in_sub >= dur:
+                sub_cycle_idx += 1
                 t_sub_start = t_curr
+                if sub_cycle_idx > 4:
+                    sub_cycle_idx = 0
+                    v_idx += 1
+                    if v_idx >= len(V_SCAN_STEPS):
+                        sub_stage = "FOURIER"
+                    else:
+                        sub_stage = "SCAN_CYCLE"
                 
         elif sub_stage == "FOURIER":
             stage = 2
@@ -176,17 +199,18 @@ def generate_trajectory(joint_idx=5, q_init_act=0.0, config_path="Config/Ref.yam
         dq_out.append(dq_ref)
         ddq_out.append(ddq_ref)
         stage_out.append(stage)
+        dq_step_out.append(dq_step)
         
-    return time_vec, np.array(q_out), np.array(dq_out), np.array(ddq_out), np.array(stage_out)
+    return time_vec, np.array(q_out), np.array(dq_out), np.array(ddq_out), np.array(stage_out), np.array(dq_step_out)
 
 if __name__ == "__main__":
-    # Test for Joint 5 (Wrist 3)
-    t, q, dq, ddq, stg = generate_trajectory(joint_idx=5)
+    output_path = f"Data/Trajectory_Verification_{JOINT_ACT}.png"
+    t, q, dq, ddq, stg, v_step = generate_trajectory(joint_idx=JOINT_ACT)
     plt.figure(figsize=(12, 10))
-    plt.subplot(4, 1, 1); plt.plot(t, q, 'b'); plt.ylabel("Pos (rad)"); plt.title("Joint 5 Identification Trajectory")
+    plt.subplot(4, 1, 1); plt.plot(t, q, 'b'); plt.ylabel("Pos (rad)"); plt.title(f"Joint {JOINT_ACT} Identification Trajectory")
     plt.subplot(4, 1, 2); plt.plot(t, dq, 'g'); plt.ylabel("Vel (rad/s)")
     plt.subplot(4, 1, 3); plt.plot(t, ddq, 'r'); plt.ylabel("Acc (rad/s^2)")
     plt.subplot(4, 1, 4); plt.plot(t, stg, 'k'); plt.ylabel("Stage")
     plt.tight_layout()
-    plt.savefig("Data/Trajectory_Verification_Joint5.png")
-    print("[INFO] Plot saved to Data/Trajectory_Verification_Joint5.png")
+    plt.savefig(output_path)
+    print(f"[INFO] Plot saved to {output_path}")
