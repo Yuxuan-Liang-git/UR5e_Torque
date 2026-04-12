@@ -8,6 +8,7 @@ from export_model_ur5e import export_ur5e_model
 import casadi as ca
 from acados_template import AcadosOcp
 import os
+from pathlib import Path
 
 # ── Coordinate-transform constant ─────────────────────────────────────────────
 # Measured: R_pin = R_mj @ Rz90
@@ -353,3 +354,59 @@ class NMPCController(BaseController):
         
         # 返回前馈力矩、期望位置、期望速度
         return np.asarray(tau_nmpc_ff).flatten(), q_nmpc_des, dq_nmpc_des
+
+
+class FrictionCompensator:
+    """
+    关节摩擦力补偿器，使用 Stribeck 模型。
+    """
+    def __init__(self, param_dir, enabled=True, comp_factor=0.25, vel_threshold=0.01):
+        self.enabled = enabled
+        self.comp_factor = comp_factor
+        self.vel_threshold = vel_threshold
+        self.param_dir = Path(param_dir)
+        self.models = {}
+        
+        if self.enabled:
+            for i in range(6):
+                p_path = self.param_dir / f"joint_{i}_param.yaml"
+                if p_path.exists():
+                    with open(p_path, 'r') as f:
+                        params = yaml.safe_load(f)
+                    S = params.get("Stribeck", {})
+                    self.models[i] = {
+                        "Fc": S.get("Fc", 0.0),
+                        "Fs": S.get("Fs", 0.0),
+                        "vs": S.get("vs", 0.01),
+                        "B": S.get("B", 0.0),
+                        "bias": params.get("bias", 0.0)
+                    }
+                else:
+                    print(f"[WARN] Friction parameters for joint {i} not found at {p_path}")
+
+    def compute_torque(self, dq):
+        """
+        根据当前关节速度计算补偿力矩。
+        dq: [6] 关节速度
+        """
+        if not self.enabled or not self.models:
+            return np.zeros(6)
+        
+        tau_comp = np.zeros(6)
+        dq = np.asarray(dq)
+        for i, m in self.models.items():
+            v = dq[i]
+            # 平滑符号函数，避免零速附近的抖动
+            if abs(v) > self.vel_threshold:
+                f_sign = np.sign(v)
+            else:
+                f_sign = v / self.vel_threshold
+            
+            # Stribeck 摩擦力模型
+            stribeck = m['Fc'] + (m['Fs'] - m['Fc']) * np.exp(-(v/m['vs'])**2)
+            tau_fric = stribeck * f_sign + m['B'] * v
+            
+            # 综合补偿 (摩擦力 + 偏置) * 安全系数
+            tau_comp[i] = self.comp_factor * (tau_fric + m['bias'])
+            
+        return tau_comp

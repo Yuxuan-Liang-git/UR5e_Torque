@@ -8,7 +8,7 @@ import yaml
 import mujoco
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
-from Controller import PDJointController, NMPCController
+from Controller import PDJointController, NMPCController, FrictionCompensator
 from visualization import VisualizationWorker, UDPLogger
 
 
@@ -206,8 +206,17 @@ def main():
     data_plan = mujoco.MjData(model)
     data_ik = mujoco.MjData(model)
     
-    joint_controller = PDJointController(model=model, kp=kp, kd=kd, torque_limits=torque_limits)
+    pdjoint_controller = PDJointController(model=model, kp=kp, kd=kd, torque_limits=torque_limits)
     nmpc_controller = NMPCController(model=model, config_path=args.config, rebuild=rebuild_solver)
+    
+    fric_cfg = cfg.get("friction_compensation", {"enabled": False})
+    fric_enabled = fric_cfg.get("enabled", False)
+    friction_compensator = FrictionCompensator(
+        param_dir=fric_cfg.get("param_dir", "../joint_test/Config"),
+        enabled=fric_enabled,
+        comp_factor=fric_cfg.get("comp_factor", 0.25),
+        vel_threshold=fric_cfg.get("vel_threshold", 0.01)
+    )
     
     ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
     if ee_site_id == -1:
@@ -351,15 +360,16 @@ def main():
 
                 tau_nmpc, q_nmpc_des, dq_nmpc_des = nmpc_controller.compute_torque(data, q, dq, ref_q_batch, ref_dq_batch)
 
-                tau_pd_fb = joint_controller.compute_torque(q_nmpc_des, q, dq_nmpc_des, dq)
+                tau_pd_fb = pdjoint_controller.compute_torque(q_nmpc_des, q, dq_nmpc_des, dq)
                 # =============================================================
                 # PD 跟随同一个关节空间目标（来自 IK 参考），保证混合控制一致
                 # =============================================================
                 q_des = ref_q_batch[:, 0].copy()
                 dq_des = ref_dq_batch[:, 0].copy()
 
-            # 计算 PD 控制力矩 (不含重力)
-            tau_pd = joint_controller.compute_torque(q_des, q, dq_des, dq)
+            # 计算各补偿项力矩
+            tau_pd = pdjoint_controller.compute_torque(q_des, q, dq_des, dq)
+            tau_fric = friction_compensator.compute_torque(dq) if fric_enabled else np.zeros(6)
 
             # =================================================================
             # 拼接力矩: 前三轴 PD, 后三轴 NMPC
@@ -367,10 +377,13 @@ def main():
             if traj_started:
                 # tau = np.concatenate([tau_pd[:3], tau_nmpc[3:]])
 
-                tau = tau_nmpc + 0.5 * tau_pd_fb 
+                tau = tau_nmpc + 0.1 * tau_pd_fb 
                 # tau = tau_pd
             else:
                 tau = tau_pd
+            
+            # 叠加摩擦力补偿
+            tau += tau_fric
 
             if t_now > STABILIZE_END:
                 ok = rtde_c.directTorque(tau.tolist(), False)
@@ -391,6 +404,7 @@ def main():
                     "tau_pd": tau_pd,
                     "tau_pd_fb": tau_pd_fb,
                     "tau_nmpc": tau_nmpc,
+                    "tau_fric": tau_fric,
                     "traj_started": float(traj_started),
                 },
             )

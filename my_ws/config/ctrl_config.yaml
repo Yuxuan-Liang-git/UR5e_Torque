@@ -81,3 +81,10 @@ nmpc_controller:
     sim_method_num_steps: 1
     qp_solver_iter_max: 50
     regularize_method: MIRROR
+
+# 摩擦力补偿配置
+friction_compensation:
+  enabled: true
+  comp_factor: 0.25
+  param_dir: "../joint_test/Config"
+  vel_threshold: 0.01
