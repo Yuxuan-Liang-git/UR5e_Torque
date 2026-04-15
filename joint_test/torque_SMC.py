@@ -27,9 +27,11 @@ KD = np.array([40.0, 40.0, 40.0, 5.0, 5.0, 1.0], dtype=float)
 TORQUE_LIMITS = np.array([20.0, 20.0, 20.0, 10.0, 10.0, 10.0], dtype=float)
 
 # --- SMC 控制器参数 ---
-C_SMC = 10.0      # 滑模面参数 lambda
-U_SMC = 3 * np.array([5.0, 5.0, 5.0, 5.0, 10.0, 50.0], dtype=float) # 切换增益
-TANH_BETA = 50.0   # tanh 函数斜率
+# sigma = de + lambda * e
+lambda_SMC = 10.0      # 滑模面参数 lambda
+K_SMC = np.array([100.0, 100.0, 100.0, 30.0, 30.0, 30.0], dtype=float)           # 滑模指数收敛增益
+U_SMC = 1.0 * np.array([5.0, 5.0, 5.0, 1.0, 1.0, 1.0], dtype=float) # 切换增益
+TANH_BETA = 10.0   # tanh 函数斜率
 
 # --- 全局停止事件 ---
 stop_event = threading.Event()
@@ -250,7 +252,6 @@ def main():
                 mujoco.mju_quat2Mat(x_des_mat, x_des_quat)
                 x_des_mat = x_des_mat.reshape(3, 3)
                 
-                # 为了 ISM 仍然需要一个关节空间参考 q_des (解析逆解或伪逆映射)
                 q_des, rot_err = map_task_target_to_joint(model, data, ee_site_id, x_des_pos, x_des_quat, q)
                 dq_des = np.zeros(6) 
                 
@@ -268,26 +269,26 @@ def main():
             e6 = np.concatenate([pos_err, rot_err])
             
             u_nom = np.zeros(6)
-            u_ism = np.zeros(6)
+            u_smc = np.zeros(6)
+            sigma = np.zeros(6)
             if traj_started:
                 # --- 1. 计算关节空间跟踪误差 ---
                 e_joint = q - q_des
                 de_joint = dq - dq_des
                 
                 # --- 2. 构建滑模面 sigma = de + lambda * e ---
-                sigma = de_joint + C_SMC * e_joint
+                sigma = de_joint + lambda_SMC * e_joint
 
                 # --- 3. 计算直接力矩输出 tau ---
-                u_smc = -C_SMC * de_joint - U_SMC * np.tanh(sigma * TANH_BETA)
-                tau = u_smc
+                u_nom = -K_SMC * sigma
+                u_smc = - U_SMC * np.tanh(sigma * TANH_BETA)
+                tau = u_nom + u_smc
                 
-                # 为日志记录设置 u_ism (即 SMC 带来的全部指令力矩)
-                u_ism = u_smc
             else:
                 # --- 初始化或复位阶段：使用简单的关节空间 PD ---
                 # 注意：此时 q_des 是根据稳定/重置逻辑计算的
                 tau = KP * (q_des - q) + KD * (dq_des - dq)
-                u_ism = np.zeros(6)
+                u_smc = np.zeros(6)
 
             tau = np.clip(tau, -TORQUE_LIMITS, TORQUE_LIMITS)
 
@@ -298,14 +299,19 @@ def main():
                     break
 
             total_loop_count += 1
+            error_q = q_des - q
             extra_data = {
                 "dq": dq,
                 "dq_des": dq_des,
-                "u_ism": u_ism,
-                "u_nom": np.zeros(6),
+                "error_q": error_q,
+                "tau": tau,
+                "u_smc": u_smc,
+                "u_nom": u_nom,
+                "sigma": sigma,
                 "rot_err": rot_err
             }
-            logger.update(total_loop_count, q_des, q, x_des_pos, x_curr_pos, tau, extra=extra_data)
+            if t_now >= RESET_END:
+               logger.update(total_loop_count, q_des, q, x_des_pos, x_curr_pos, tau, extra=extra_data)
 
             if (not trajectory_points) or (t_now >= next_traj_sample):
                 trajectory_points.append(x_curr_pos.copy())
