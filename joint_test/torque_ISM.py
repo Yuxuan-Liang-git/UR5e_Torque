@@ -35,7 +35,7 @@ KD_TASK = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=float)
 # sigma = S1 * (q - q_t0 - ∫dq) + S2 * (dq - dq_t0 - ∫u)
 S1_ISM = 1.0 * np.array([10.0, 10.0, 10.0, 10.0, 10.0, 10.0], dtype=float)
 # UMAX_ISM = np.array([5.0, 1.0, 6.0, 20.0, 20.0, 1000.0], dtype=float)
-UMAX_ISM = np.array([0.0, 0.0, 0.0, 0.0, 100.0, 10000.0], dtype=float)
+UMAX_ISM = np.array([15.0, 2.0, 30.0, 15.0, 300.0, 10000.0], dtype=float)
 
 
 # --- 全局停止事件 ---
@@ -287,6 +287,10 @@ def main():
                 u_pos = J6.T @ np.concatenate([w_task[:3], np.zeros(3)])
                 u_ori = J6.T @ np.concatenate([np.zeros(3), w_task[3:]])
                 tau_PD = u_pos + u_ori
+                
+                # 根据当前雅可比逆，实时更新关节空间期望位置（用于日志与记录等）
+                dq_cmd = np.linalg.pinv(J6) @ e6
+                q_des = q + dq_cmd
 
             else:
                 # --- 初始化阶段：关节 PD ---
