@@ -24,7 +24,7 @@ from visualization import VisualizationWorker, UDPLogger
 # --- 硬编码控制器参数 ---
 KP = np.array([1500.0, 1500.0, 1500.0, 150.0, 150.0, 10.0], dtype=float)
 KD = np.array([40.0, 40.0, 40.0, 5.0, 5.0, 1.0], dtype=float)
-TORQUE_LIMITS = np.array([20.0, 20.0, 20.0, 10.0, 10.0, 10.0], dtype=float)
+TORQUE_LIMITS = np.array([50.0, 50.0, 50.0, 15.0, 15.0, 15.0], dtype=float)
 
 # --- 任务空间解耦 PD 控制器参数 ---
 # tau = J^T * [Kp_task * e6 - Kd_task * (J * dq)]
@@ -34,9 +34,9 @@ KD_TASK = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=float)
 # --- ISM 参数 ---
 # sigma = S1 * (q - q_t0 - ∫dq) + S2 * (dq - dq_t0 - ∫u)
 S1_ISM = 1.0 * np.array([10.0, 10.0, 10.0, 10.0, 10.0, 10.0], dtype=float)
-# UMAX_ISM = np.array([5.0, 1.0, 6.0, 20.0, 20.0, 1000.0], dtype=float)
-UMAX_ISM = np.array([15.0, 2.0, 30.0, 15.0, 300.0, 10000.0], dtype=float)
+UMAX_ISM = 1.0 * np.array([30.0, 15.0, 20.0, 50.0, 50.0, 5000.0], dtype=float)
 
+K_TANH = 10.0 
 
 # --- 全局停止事件 ---
 stop_event = threading.Event()
@@ -269,6 +269,9 @@ def main():
                 mujoco.mju_quat2Mat(x_des_mat, x_des_quat)
                 x_des_mat = x_des_mat.reshape(3, 3)
                 
+            pos_err = np.zeros(3)
+            rot_err = np.zeros(3)
+
             if traj_started:
                 # --- 1. 计算误差与雅可比 ---
                 pos_err, rot_err, _ = compute_task_errors(x_des_pos, x_des_quat, x_curr_pos, x_curr_mat)
@@ -309,32 +312,20 @@ def main():
             
             sigma = np.zeros(6)
             u_ISM = np.zeros(6)
-            ism_q_nom_abs = np.zeros(6)
             
             if traj_started:
                 if not ism_init:
-                    ism_q_t0 = q.copy()
-                    ism_dq_t0 = dq.copy()
-                    ism_q_nom = np.zeros(6)
-                    ism_dq_nom = np.zeros(6)
-                    ism_dq_old = np.zeros(6)
+                    dq_prev = dq.copy()
                     ism_init = True
-                    
-                # 2. 积分名义加速度 -> 得到名义速度的变化
-                # 对应论文中的 ∫ u dζ
-                # ism_dq_nom += u * CONTROL_DT
+                # 1. 实际速度的变化量 (Actual velocity increment)
+                delta_dq_actual = dq - dq_prev
+                # 2. 名义加速度带来的期望速度变化量 (Nominal velocity increment)
+                delta_dq_nom = u * CONTROL_DT
+                # 3. 增量式更新滑模面
+                # 本质：滑模面 = 上一拍的滑模面 + (实际变化 - 期望变化)
+                sigma += (delta_dq_actual - delta_dq_nom)
 
-                ism_dq_nom = ism_dq_old + u * CONTROL_DT
-                ism_dq_old = dq.copy()
-
-                # 3. 积分名义速度 -> 得到名义位置的变化
-                # ism_q_nom += (ism_dq_t0 + ism_dq_nom) * CONTROL_DT
-
-                # 积分实际速度
-                ism_q_nom += dq * CONTROL_DT
-                # sigma = S1_ISM * (q - ism_q_t0 - ism_q_nom) + (dq - ism_dq_t0 - ism_dq_nom)
-
-                sigma = (dq - ism_dq_t0) - ism_dq_nom
+                # u_ISM = -UMAX_ISM * np.tanh(K_TANH * sigma)
 
                 u_ISM = -UMAX_ISM * np.sign(sigma)
 
@@ -360,8 +351,10 @@ def main():
                 "tau_PD": tau_PD,
                 "u_pos": u_pos,
                 "u_ori": u_ori,
+                "pos_err": pos_err,
                 "rot_err": rot_err,
                 "sigma": sigma,
+                "u": u,
                 "u_ISM": u_ISM,
             }
             if t_now >= RESET_END:
