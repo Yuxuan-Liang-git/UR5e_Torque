@@ -34,7 +34,7 @@ KD_TASK = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=float)
 # --- ISM 参数 ---
 # sigma = S1 * (q - q_t0 - ∫dq) + S2 * (dq - dq_t0 - ∫u)
 S1_ISM = 1.0 * np.array([10.0, 10.0, 10.0, 10.0, 10.0, 10.0], dtype=float)
-UMAX_ISM = 1.0 * np.array([30.0, 15.0, 20.0, 50.0, 50.0, 5000.0], dtype=float)
+UMAX_ISM = 0.0 * np.array([30.0, 15.0, 20.0, 50.0, 50.0, 5000.0], dtype=float)
 
 K_TANH = 10.0 
 
@@ -64,6 +64,14 @@ def get_traj_vel(t: float, circle_radius: float, circle_omega: float) -> np.ndar
         2.0 * circle_radius * circle_omega * np.sin(circle_omega * t),
         2.0 * circle_radius * circle_omega * np.cos(2.0 * circle_omega * t),
         0.5 * circle_radius * circle_omega * np.sin(circle_omega * t),
+    ])
+
+def get_traj_acc(t: float, circle_radius: float, circle_omega: float) -> np.ndarray:
+    """计算 figure-8 轨迹的期望加速度 (ddx_des_pos)"""
+    return np.array([
+        2.0 * circle_radius * (circle_omega**2) * np.cos(circle_omega * t),
+        -4.0 * circle_radius * (circle_omega**2) * np.sin(2.0 * circle_omega * t),
+        0.5 * circle_radius * (circle_omega**2) * np.cos(circle_omega * t),
     ])
 
 def get_target_ori(
@@ -269,10 +277,22 @@ def main():
                 mujoco.mju_quat2Mat(x_des_mat, x_des_quat)
                 x_des_mat = x_des_mat.reshape(3, 3)
                 
+            M = np.zeros((model.nv, model.nv))
+            mujoco.mj_fullM(model, M, data.qM)
+            M6 = M[:6, :6]
+            M_inv = np.linalg.inv(M6 + 1e-6 * np.eye(6))
+
             pos_err = np.zeros(3)
             rot_err = np.zeros(3)
-
             if traj_started:
+                # 获取前馈速度和前馈加速度
+                dx_des_pos = get_traj_vel(t_traj, CIRCLE_RADIUS, CIRCLE_OMEGA)
+                ddx_des_pos = get_traj_acc(t_traj, CIRCLE_RADIUS, CIRCLE_OMEGA)
+                
+                # 为了简单，姿态先设为保持目标不变（期望角速度和角加速度为0）
+                dx_des = np.concatenate([dx_des_pos, np.zeros(3)])
+                ddx_des = np.concatenate([ddx_des_pos, np.zeros(3)])
+
                 # --- 1. 计算误差与雅可比 ---
                 pos_err, rot_err, _ = compute_task_errors(x_des_pos, x_des_quat, x_curr_pos, x_curr_mat)
                 
@@ -281,19 +301,22 @@ def main():
                 mujoco.mj_jacSite(model, data, jacp, jacr, ee_site_id)
                 J6 = np.vstack([jacp[:, :6], jacr[:, :6]])
                 
-                # --- 2. 任务空间控制律 ---
-                # tau = J^T * (Kp * e - Kd * (J * dq))
-                e6 = np.concatenate([pos_err, rot_err])
-                v6 = J6 @ dq
-
-                w_task = KP_TASK * e6 - KD_TASK * v6
+                # --- 2. 任务空间阻抗控制律 (加入前馈) ---
+                e6_pos = np.concatenate([pos_err, rot_err])
+                
+                # 关键修复1：速度误差应该是 期望速度 - 实际速度
+                v6_actual = J6 @ dq
+                e6_vel = dx_des - v6_actual 
+                
+                # 设定任务空间的虚拟质量 
+                M_TASK = 1.0
+                
+                # 关键修复2：完整的阻抗力矩 = 前馈力 + 刚度恢复力 + 阻尼力
+                w_task = M_TASK * ddx_des + KP_TASK * e6_pos + KD_TASK * e6_vel
+                
                 u_pos = J6.T @ np.concatenate([w_task[:3], np.zeros(3)])
                 u_ori = J6.T @ np.concatenate([np.zeros(3), w_task[3:]])
                 tau_PD = u_pos + u_ori
-                
-                # 根据当前雅可比逆，实时更新关节空间期望位置（用于日志与记录等）
-                dq_cmd = np.linalg.pinv(J6) @ e6
-                q_des = q + dq_cmd
 
             else:
                 # --- 初始化阶段：关节 PD ---
@@ -301,12 +324,6 @@ def main():
                 u_pos = tau_PD.copy()
                 u_ori = np.zeros(6)
 
-            # --- 3. 获取质量矩阵 ---
-            M = np.zeros((model.nv, model.nv))
-            mujoco.mj_fullM(model, M, data.qM)
-            M6 = M[:6, :6]
-            M_inv = np.linalg.inv(M6 + 1e-6 * np.eye(6))
-            
             # --- 4. 积分滑模面 ISM 计算 ---
             u = M_inv @ tau_PD
             
@@ -322,12 +339,12 @@ def main():
                 # 2. 名义加速度带来的期望速度变化量 (Nominal velocity increment)
                 delta_dq_nom = u * CONTROL_DT
                 # 3. 增量式更新滑模面
-                # 本质：滑模面 = 上一拍的滑模面 + (实际变化 - 期望变化)
                 sigma += (delta_dq_actual - delta_dq_nom)
+                # sigma = (delta_dq_actual - delta_dq_nom)
 
-                # u_ISM = -UMAX_ISM * np.tanh(K_TANH * sigma)
+                u_ISM = -UMAX_ISM * np.tanh(K_TANH * sigma)
 
-                u_ISM = -UMAX_ISM * np.sign(sigma)
+                # u_ISM = -UMAX_ISM * np.sign(sigma)
 
                 tau = tau_PD + M6 @ u_ISM
             else:
