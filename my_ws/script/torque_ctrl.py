@@ -32,11 +32,20 @@ VIS_FREQ = 50.0
 def get_traj_pos(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> np.ndarray:
     """计算 8 字轨迹期望位置"""
     x_des_pos = x_des_pos_init + np.array([
-        2.0 * circle_radius * np.sin(circle_omega * t),
-        circle_radius * np.sin(2 * circle_omega * t),
-        0.0,
+        - 2.0 * circle_radius * (np.cos(circle_omega * t) - 1.0),
+        1.0 * circle_radius * np.sin(2.0 * circle_omega * t),
+        - 0.5 * circle_radius * (np.cos(circle_omega * t) - 1.0),
     ])
     return x_des_pos
+
+
+def get_traj_vel(t: float, circle_radius: float, circle_omega: float) -> np.ndarray:
+    """计算 8 字轨迹期望速度"""
+    return np.array([
+        2.0 * circle_radius * circle_omega * np.sin(circle_omega * t),
+        2.0 * circle_radius * circle_omega * np.cos(2.0 * circle_omega * t),
+        0.5 * circle_radius * circle_omega * np.sin(circle_omega * t),
+    ])
 
 
 def get_target_ori(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float, dt: float = 1e-3) -> np.ndarray:
@@ -56,8 +65,8 @@ def get_target_ori(t: float, x_des_pos_init: np.ndarray, circle_radius: float, c
     return np.column_stack([tangent, y_axis, z_axis])
 
 
-def get_traj(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """获取 t 时刻的期望位置、四元数姿态和期望速度"""
+def get_traj(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> tuple[np.ndarray, np.ndarray]:
+    """获取 t 时刻的期望位置和四元数姿态"""
     x_des_pos = get_traj_pos(t, x_des_pos_init, circle_radius, circle_omega)
     x_des_mat = get_target_ori(t, x_des_pos_init, circle_radius, circle_omega)
     x_des_quat = np.zeros(4)
@@ -305,10 +314,10 @@ def main():
 
     if ctrl_mode == "PD":
         pd_cfg = ctrl_cfg.get("pd_controller", {})
-        stiffness = np.diag(pd_cfg.get("stiffness", [100.0]*6))
-        damping_ratio = np.diag(pd_cfg.get('damping_ratio', [1.0]*6))
-        damping = damping_ratio * 2.0 * np.sqrt(stiffness)
-        active_controller = PDController(model, stiffness, damping, vel_limits)
+        task_kp = np.array(pd_cfg.get("task_kp", [5000.0, 5000.0, 5000.0, 30.0, 30.0, 30.0]), dtype=float)
+        task_kd = np.array(pd_cfg.get("task_kd", [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]), dtype=float)
+        pd_torque_limits = np.array(pd_cfg.get("torque_limits", torque_limits), dtype=float)
+        active_controller = PDController(model, task_kp, task_kd, pd_torque_limits)
         print(f"[INFO] Using PD Controller")
     else:
         imp_cfg = ctrl_cfg.get("impedance_controller", {})
@@ -447,6 +456,10 @@ def main():
                 t_traj = t_now - RESET_END
                 x_des_pos, x_des_quat = get_traj(t_traj, x_des_pos_init, circle_radius, circle_omega)
                 v_des = np.zeros(6)
+                v_des[:3] = get_traj_vel(t_traj, circle_radius, circle_omega)
+
+            if np.dot(x_des_quat, x_curr_quat) < 0:
+                x_curr_quat = -x_curr_quat
             
             x_des_mat = np.zeros(9)
             mujoco.mju_quat2Mat(x_des_mat, x_des_quat)
@@ -454,14 +467,14 @@ def main():
 
             # 使用封装后的控制器计算关节力矩
             tau = active_controller.compute_torque(
-                data, ee_site_id, 
+                data, ee_site_id,
                 x_des_pos, x_des_quat, v_ee, v_des
             )
             tau = np.clip(tau, -torque_limits, torque_limits)
 
             # 仅在稳定阶段结束后发送力矩
             if t_now > STABILIZE_END:
-                ok = rtde_c.directTorque(tau.tolist(),True)
+                ok = rtde_c.directTorque(tau.tolist(),False)
                 if not ok:
                     print("[ERROR] directTorque failed")
                     break

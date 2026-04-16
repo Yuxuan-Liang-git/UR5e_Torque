@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Joint-space PD torque control for UR5e with figure-8 EE tracking.
+"""Task-space PD torque control for UR5e with figure-8 EE tracking.
 (Converted from torque_ISM.py to JointSpace form)
 
 Control law:
-    tau = Kp * (q_des - q) + Kd * (dq_des - dq)
+    tau = J^T * (Kp * e - Kd * (J * dq))
 
 Joint references are generated from end-effector figure-8 trajectory using
 Jacobian-based resolved-rate mapping, then tracked by joint-space PD.

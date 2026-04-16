@@ -41,19 +41,17 @@ class BaseController:
         # 1. 位置误差
         pos_err = target_pos - current_pos
 
-        # 2. 旋转误差 (使用四元数计算轴角)
+        # 2. 旋转误差 (使用四元数计算轴角, 与目标四元数同半球)
         curr_quat = np.zeros(4)
         mujoco.mju_mat2Quat(curr_quat, current_mat.flatten())
-        
+        if np.dot(target_quat, curr_quat) < 0:
+            curr_quat = -curr_quat
+
         quat_inv = np.zeros(4)
         mujoco.mju_negQuat(quat_inv, curr_quat)
-        
+
         quat_err = np.zeros(4)
         mujoco.mju_mulQuat(quat_err, target_quat, quat_inv)
-        
-        # 3. 确保四元数在同一半球 (shortest path)
-        if quat_err[0] < 0:
-            quat_err = -quat_err
 
         rot_err = np.zeros(3)
         mujoco.mju_quat2Vel(rot_err, quat_err, 1.0)
@@ -66,51 +64,45 @@ class BaseController:
 
 class PDController(BaseController):
     """
-    任务空间 PD 控制器
-    公式: F_task = Kp * err + Kd * v_err
+    参考 decoupledPD.py 的任务空间解耦 PD 控制器。
+
+    控制律:
+        tau = J^T * (Kp_task * e6 - Kd_task * (J * dq))
+
+    并按位置/姿态分别投影到关节空间后再相加。
     """
-    def __init__(self, model, stiffness, damping, vel_limits=None):
+    def __init__(
+        self,
+        model,
+        task_kp,
+        task_kd,
+        torque_limits=None,
+    ):
         super().__init__(model)
-        self.stiffness = stiffness
-        self.damping = damping
-        self.vel_limits = vel_limits
+        self.task_kp = np.asarray(task_kp, dtype=float)
+        self.task_kd = np.asarray(task_kd, dtype=float)
+        self.torque_limits = None if torque_limits is None else np.asarray(torque_limits, dtype=float)
 
     def compute_torque(self, data, site_id, target_pos, target_quat, v_ee, v_des):
-        """
-        计算 PD 控制力矩
-        """
-        # 1. 获取当前状态并计算误差
         current_pos = data.site_xpos[site_id]
         current_mat = data.site_xmat[site_id].reshape(3, 3)
         pos_err, rot_err = self.compute_errors(target_pos, target_quat, current_pos, current_mat)
 
-        # 2. 计算雅可比矩阵
         mujoco.mj_jacSite(self.model, data, self.jac[:3], self.jac[3:], site_id)
-        J = self.jac[:, :6] 
+        J6 = self.jac[:, :6]
 
-        # 3. 计算基本控制力
-        err = np.concatenate([pos_err, rot_err])
-        v_err = v_des - v_ee
-        self.F_task = self.stiffness @ err + self.damping @ v_err
+        e6 = np.concatenate([pos_err, rot_err])
+        v6 = J6 @ np.asarray(data.qvel[:6], dtype=float)
 
-        # 4. 速度限制逻辑
-        if self.vel_limits is not None:
-            v_trans = v_ee[:3]
-            v_max_trans = np.min(self.vel_limits[:3])
-            speed_trans = np.linalg.norm(v_trans)
-            if speed_trans > v_max_trans:
-                penalty_k = 200.0
-                self.F_task[:3] -= penalty_k * (speed_trans - v_max_trans) * (v_trans / speed_trans)
+        w_task = self.task_kp * e6 - self.task_kd * v6
+        u_pos = J6.T @ np.concatenate([w_task[:3], np.zeros(3)])
+        u_ori = J6.T @ np.concatenate([np.zeros(3), w_task[3:]])
+        tau = u_pos + u_ori
+        self.F_task = w_task
 
-            v_rot = v_ee[3:]
-            v_max_rot = np.min(self.vel_limits[3:])
-            speed_rot = np.linalg.norm(v_rot)
-            if speed_rot > v_max_rot:
-                penalty_k_rot = 50.0
-                self.F_task[3:] -= penalty_k_rot * (speed_rot - v_max_rot) * (v_rot / speed_rot)
+        if self.torque_limits is not None:
+            tau = np.clip(tau, -self.torque_limits, self.torque_limits)
 
-        # 5. 投影到关节空间
-        tau = J.T @ self.F_task
         return np.asarray(tau).flatten()
 
 class ImpedanceController(BaseController):
@@ -175,6 +167,13 @@ class ImpedanceController(BaseController):
         # 7. 映射回关节力矩
         tau = J.T @ self.F_task
         return np.asarray(tau).flatten()
+
+
+class ImpedanceControllerLegacy(ImpedanceController):
+    """兼容旧的阻抗扭矩实现，保留原有接口。"""
+
+
+ImpedanceController = ImpedanceControllerLegacy
 
 
 class PDJointController(BaseController):
