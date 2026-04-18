@@ -1,5 +1,7 @@
 import argparse
 import time
+import signal
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -14,9 +16,12 @@ from visualization import VisualizationWorker, UDPLogger
 VIS_FREQ = 50.0
 
 # --- ISM 参数 ---
-SIGMA_LIMIT = 1.0   
-UMAX_ISM = np.array([20.0, 10.0, 20.0, 150.0, 500.0, 10000.0], dtype=float)
-K_TANH = np.array([5.0, 5.0, 5.0, 5.0, 5.0, 1.0], dtype=float)
+SIGMA_LIMIT = 0.5
+# UMAX_ISM = np.array([20.0, 10.0, 15.0, 0.0, 500.0, 8000.0], dtype=float)
+
+UMAX_ISM = np.array([20.0, 2.0, 15.0, 100.0, 500.0, 8000.0], dtype=float)
+
+K_TANH = np.array([5.0, 5.0, 5.0, 5.0, 3.0, 3.0], dtype=float)
 
 # --- 正弦跟踪参数 ---
 # 字典格式：{关节索引: (振幅, 频率)}
@@ -24,6 +29,9 @@ SINE_PARAMS = {
     0: (0.2, 0.2), # 0轴 振幅0.2 rad, 频率0.2 Hz
     1: (0.2, 0.2),
     2: (0.2, 0.2),
+    3: (0.5, 0.5),
+    4: (0.5, 0.5), # 4轴 振幅0.1 rad, 频率0.5 Hz
+    5: (0.5, 0.5), # 5轴 振幅0.1 rad, 频率0.5 Hz
 }
 
 def get_traj_pos(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> np.ndarray:
@@ -179,6 +187,12 @@ def load_init_q(init_pos_path: Path):
         return None
 
 def main():
+    keep_running = [True]
+    def signal_handler(sig, frame):
+        print("\n[INFO] Ctrl+C detected, stopping loop...")
+        keep_running[0] = False
+    signal.signal(signal.SIGINT, signal_handler)
+
     args = parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -287,7 +301,7 @@ def main():
 
 
     try:
-        while True:
+        while keep_running[0]:
             if visualizer is not None and not visualizer.is_running():
                 print("[INFO] Visualization closed, stopping controller loop.")
                 break
@@ -400,7 +414,6 @@ def main():
                 # 3. 增量式更新滑模面
                 sigma += (delta_dq_actual - delta_dq_nom)
 
-
                 sigma = np.clip(sigma, -SIGMA_LIMIT, SIGMA_LIMIT)
 
                 u_ISM = -UMAX_ISM * np.tanh(K_TANH * sigma)
@@ -415,7 +428,7 @@ def main():
                 # tau = np.concatenate([tau_pd[:3], tau_nmpc[3:]])
 
                 tau = tau_nmpc + tau_ism
-                # tau = tau_ism
+                # tau = tau_nmpc
                 # tau = tau_nmpc + 0.1 * tau_pd
             else:
                 tau = tau_pd
