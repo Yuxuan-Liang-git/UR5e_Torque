@@ -14,8 +14,17 @@ from visualization import VisualizationWorker, UDPLogger
 VIS_FREQ = 50.0
 
 # --- ISM 参数 ---
-UMAX_ISM = 1.0 * np.array([1.0, 0.0, 0.0, 0.0, 100.0, 10000.0], dtype=float)
-K_TANH = 10.0 
+SIGMA_LIMIT = 1.0   
+UMAX_ISM = np.array([20.0, 10.0, 20.0, 150.0, 500.0, 10000.0], dtype=float)
+K_TANH = np.array([5.0, 5.0, 5.0, 5.0, 5.0, 1.0], dtype=float)
+
+# --- 正弦跟踪参数 ---
+# 字典格式：{关节索引: (振幅, 频率)}
+SINE_PARAMS = {
+    0: (0.2, 0.2), # 0轴 振幅0.2 rad, 频率0.2 Hz
+    1: (0.2, 0.2),
+    2: (0.2, 0.2),
+}
 
 def get_traj_pos(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> np.ndarray:
     return x_des_pos_init + np.array([
@@ -336,30 +345,31 @@ def main():
                     traj_started = True
 
                 t_traj = t_now - RESET_END
-                x_des_pos, x_des_quat = get_traj(t_traj, x_des_pos_init, circle_radius, circle_omega)
-                x_des_mat = np.zeros(9)
-                mujoco.mju_quat2Mat(x_des_mat, x_des_quat)
-                x_des_mat = x_des_mat.reshape(3, 3)
 
-                ref_q_batch, ref_dq_batch = build_reference_batch(
-                    model,
-                    data_ik,
-                    ee_site_id,
-                    q,
-                    t_traj,
-                    x_des_pos_init,
-                    circle_radius,
-                    circle_omega,
-                    horizon_steps,
-                    dt,
-                )
+                # --- 改为生成关节正弦跟踪参考轨迹 ---
+                ref_q_batch = np.zeros((6, horizon_steps + 1))
+                ref_dq_batch = np.zeros((6, horizon_steps + 1))
+                for k in range(horizon_steps + 1):
+                    tk = t_traj + k * dt
+                    qk = q_target.copy()
+                    dqk = np.zeros(6)
+                    for j_idx, (amp, freq) in SINE_PARAMS.items():
+                        qk[j_idx] += amp * np.sin(2.0 * np.pi * freq * tk)
+                        dqk[j_idx] = amp * 2.0 * np.pi * freq * np.cos(2.0 * np.pi * freq * tk)
+                    ref_q_batch[:, k] = qk
+                    ref_dq_batch[:, k] = dqk
 
-                tau_nmpc, _, _ = nmpc_controller.compute_torque(data, q, dq, ref_q_batch, ref_dq_batch)
-                # =============================================================
-                # PD 跟随同一个关节空间目标（来自 IK 参考），保证混合控制一致
-                # =============================================================
                 q_des = ref_q_batch[:, 0].copy()
                 dq_des = ref_dq_batch[:, 0].copy()
+
+                # 为适配后续日志输出，计算对应目标状态的末端姿态和位置
+                data_plan.qpos[:6] = q_des
+                mujoco.mj_forward(model, data_plan)
+                x_des_pos = data_plan.site_xpos[ee_site_id].copy()
+                x_des_mat = data_plan.site_xmat[ee_site_id].reshape(3, 3).copy()
+
+                tau_nmpc, _, _ = nmpc_controller.compute_torque(data, q, dq, ref_q_batch, ref_dq_batch)
+
 
             # 计算各补偿项力矩
             tau_pd = pdjoint_controller.compute_torque(q_des, q, dq_des, dq)
@@ -367,6 +377,8 @@ def main():
             M = np.zeros((model.nv, model.nv))
             mujoco.mj_fullM(model, M, data.qM)
             M6 = M[:6, :6]
+            # 提取 M6 的对角线元素，构造一个纯对角矩阵
+            M6_diag = np.diag(np.diag(M6))
             M_inv = np.linalg.inv(M6 + 1e-6 * np.eye(6))
             
             # --- 积分滑模面 ISM 计算 ---
@@ -388,11 +400,11 @@ def main():
                 # 3. 增量式更新滑模面
                 sigma += (delta_dq_actual - delta_dq_nom)
 
-                SIGMA_LIMIT = 0.5  # 根据表现微调，限制其最大累积量
+
                 sigma = np.clip(sigma, -SIGMA_LIMIT, SIGMA_LIMIT)
 
                 u_ISM = -UMAX_ISM * np.tanh(K_TANH * sigma)
-                tau_ism = M6 @ u_ISM
+                tau_ism = M6_diag @ u_ISM
             else:
                 tau_ism = np.zeros(6)
 
@@ -403,6 +415,7 @@ def main():
                 # tau = np.concatenate([tau_pd[:3], tau_nmpc[3:]])
 
                 tau = tau_nmpc + tau_ism
+                # tau = tau_ism
                 # tau = tau_nmpc + 0.1 * tau_pd
             else:
                 tau = tau_pd
