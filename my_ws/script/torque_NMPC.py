@@ -1,19 +1,32 @@
 import argparse
 import time
+import signal
+import sys
 from pathlib import Path
-from datetime import datetime
 
 import numpy as np
 import yaml
 import mujoco
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
-from Controller import PDJointController, NMPCController, FrictionCompensator
+from Controller import PDJointController, NMPCController
 from visualization import VisualizationWorker, UDPLogger
 
 
 VIS_FREQ = 50.0
 
+# --- 轨迹控制模式及参数 ---
+TRAJ = "WORK_SPACE"  # 可选: "WORK_SPACE" 或 "JOINT_SPACE"
+
+# 字典格式：{关节索引: (振幅, 频率)}
+SINE_PARAMS = {
+    0: (0.2, 0.2), # 0轴 振幅0.2 rad, 频率0.2 Hz
+    1: (0.2, 0.2),
+    2: (0.2, 0.2),
+    3: (0.5, 0.5),
+    4: (0.5, 0.5), # 4轴 振幅0.1 rad, 频率0.5 Hz
+    5: (0.5, 0.5), # 5轴 振幅0.1 rad, 频率0.5 Hz
+}
 
 def get_traj_pos(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> np.ndarray:
     return x_des_pos_init + np.array([
@@ -168,6 +181,12 @@ def load_init_q(init_pos_path: Path):
         return None
 
 def main():
+    keep_running = [True]
+    def signal_handler(sig, frame):
+        print("\n[INFO] Ctrl+C detected, stopping loop...")
+        keep_running[0] = False
+    signal.signal(signal.SIGINT, signal_handler)
+
     args = parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -209,15 +228,6 @@ def main():
     pdjoint_controller = PDJointController(model=model, kp=kp, kd=kd, torque_limits=torque_limits)
     nmpc_controller = NMPCController(model=model, config_path=args.config, rebuild=rebuild_solver)
     
-    fric_cfg = cfg.get("friction_compensation", {"enabled": False})
-    fric_enabled = fric_cfg.get("enabled", False)
-    friction_compensator = FrictionCompensator(
-        param_dir=fric_cfg.get("param_dir", "../joint_test/Config"),
-        enabled=fric_enabled,
-        comp_factor=fric_cfg.get("comp_factor", 0.25),
-        vel_threshold=fric_cfg.get("vel_threshold", 0.01)
-    )
-    
     ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
     if ee_site_id == -1:
         ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "eef_site")
@@ -249,8 +259,6 @@ def main():
     data.qpos[:6] = q_target
     mujoco.mj_forward(model, data)
     x_des_pos_init = data.site_xpos[ee_site_id].copy()
-    x_des_quat_init = np.zeros(4)
-    mujoco.mju_mat2Quat(x_des_quat_init, data.site_xmat[ee_site_id].flatten())
 
     # =========================================================================
     # 增加 NMPC 暖启动 (Warm Start)
@@ -271,20 +279,23 @@ def main():
     q_start = None
 
     traj_started = False
+    ref_q_queue = None
+    ref_dq_queue = None
     trajectory_points = []
     target_trajectory = []
     max_points = 200
     traj_sample_period = 0.05
     next_traj_sample = 0.0
 
+    total_loop_count = 0
     start_time = time.perf_counter()
     next_tick = time.perf_counter()
-    total_loop_count = 0
     freq_start_time = time.perf_counter()
     freq_loop_count = 0
 
+
     try:
-        while True:
+        while keep_running[0]:
             if visualizer is not None and not visualizer.is_running():
                 print("[INFO] Visualization closed, stopping controller loop.")
                 break
@@ -301,7 +312,9 @@ def main():
             x_curr_mat = data.site_xmat[ee_site_id].reshape(3, 3).copy()
 
             tau_nmpc = np.zeros(6)
-            tau_pd_fb = np.zeros(6)
+            x_des_quat = np.zeros(4)
+            x_des_pos = np.zeros(3)
+
 
             if t_now <= STABILIZE_END:
                 x_des_pos = x_curr_pos.copy()
@@ -322,6 +335,8 @@ def main():
                 x_des_pos = data_plan.site_xpos[ee_site_id].copy()
                 x_des_mat = data_plan.site_xmat[ee_site_id].reshape(3, 3).copy()
             else:
+                t_traj = t_now - RESET_END
+
                 if not traj_started:
                     print("[INFO] Transitioning to NMPC. Re-warming solver with current PD torques...")
                     # 1. 获取当前机器人的真实状态
@@ -337,77 +352,172 @@ def main():
                     for k in range(horizon_steps):
                         nmpc_controller.solver.set(k, "u", u_current)
 
+                    # Initialize queues
+                    ref_q_queue = np.zeros((6, horizon_steps + 1))
+                    ref_dq_queue = np.zeros((6, horizon_steps + 1))
+                    
+                    if TRAJ == "WORK_SPACE":
+                        q_sim = q_target.copy()
+                        for k in range(horizon_steps + 1):
+                            tk = t_traj + k * dt
+                            pk, rk_quat = get_traj(tk, x_des_pos_init, circle_radius, circle_omega)
+                            q_sim = map_task_target_to_joint_dls(
+                                model=model,
+                                data_ik=data_ik,
+                                ee_site_id=ee_site_id,
+                                x_des_pos=pk,
+                                x_des_quat=rk_quat,
+                                q_curr=q_sim,
+                            )
+                            ref_q_queue[:, k] = q_sim
+                    else:
+                        for k in range(horizon_steps + 1):
+                            tk = t_traj + k * dt
+                            qk = q_target.copy()
+                            for j_idx, (amp, freq) in SINE_PARAMS.items():
+                                qk[j_idx] += amp * np.sin(2.0 * np.pi * freq * tk)
+                            ref_q_queue[:, k] = qk
+
+                    # Initialize velocities via central difference
+                    for k in range(horizon_steps + 1):
+                        if k == 0:
+                            ref_dq_queue[:, k] = (ref_q_queue[:, 1] - ref_q_queue[:, 0]) / dt
+                        elif k == horizon_steps:
+                            tk_plus = t_traj + (k + 1) * dt
+                            if TRAJ == "WORK_SPACE":
+                                pk_plus, rk_quat_plus = get_traj(tk_plus, x_des_pos_init, circle_radius, circle_omega)
+                                qk_plus = map_task_target_to_joint_dls(
+                                    model=model,
+                                    data_ik=data_ik,
+                                    ee_site_id=ee_site_id,
+                                    x_des_pos=pk_plus,
+                                    x_des_quat=rk_quat_plus,
+                                    q_curr=ref_q_queue[:, k],
+                                )
+                            else:
+                                qk_plus = q_target.copy()
+                                for j_idx, (amp, freq) in SINE_PARAMS.items():
+                                    qk_plus[j_idx] += amp * np.sin(2.0 * np.pi * freq * tk_plus)
+                            ref_dq_queue[:, k] = (qk_plus - ref_q_queue[:, k - 1]) / (2.0 * dt)
+                        else:
+                            ref_dq_queue[:, k] = (ref_q_queue[:, k + 1] - ref_q_queue[:, k - 1]) / (2.0 * dt)
+
                     traj_started = True
 
-                t_traj = t_now - RESET_END
-                x_des_pos, x_des_quat = get_traj(t_traj, x_des_pos_init, circle_radius, circle_omega)
-                x_des_mat = np.zeros(9)
-                mujoco.mju_quat2Mat(x_des_mat, x_des_quat)
-                x_des_mat = x_des_mat.reshape(3, 3)
+                else:
+                    if TRAJ == "WORK_SPACE":
+                        # Update queue for workspace
+                        ref_q_queue = np.roll(ref_q_queue, -1, axis=1)
+                        ref_dq_queue = np.roll(ref_dq_queue, -1, axis=1)
+                        tk_new = t_traj + horizon_steps * dt
+                        pk, rk_quat = get_traj(tk_new, x_des_pos_init, circle_radius, circle_omega)
+                        q_new = map_task_target_to_joint_dls(
+                            model=model,
+                            data_ik=data_ik,
+                            ee_site_id=ee_site_id,
+                            x_des_pos=pk,
+                            x_des_quat=rk_quat,
+                            q_curr=ref_q_queue[:, -2],
+                        )
+                        ref_q_queue[:, -1] = q_new
 
-                ref_q_batch, ref_dq_batch = build_reference_batch(
-                    model,
-                    data_ik,
-                    ee_site_id,
-                    q,
-                    t_traj,
-                    x_des_pos_init,
-                    circle_radius,
-                    circle_omega,
-                    horizon_steps,
-                    dt,
-                )
+                        # For central diff, get k+1 point
+                        tk_plus = tk_new + dt
+                        pk_plus, rk_quat_plus = get_traj(tk_plus, x_des_pos_init, circle_radius, circle_omega)
+                        q_plus = map_task_target_to_joint_dls(
+                            model=model,
+                            data_ik=data_ik,
+                            ee_site_id=ee_site_id,
+                            x_des_pos=pk_plus,
+                            x_des_quat=rk_quat_plus,
+                            q_curr=q_new,
+                        )
+                        ref_dq_queue[:, -1] = (q_plus - ref_q_queue[:, -2]) / (2.0 * dt)
+                    else:
+                        # Update queue for joint space
+                        ref_q_queue = np.roll(ref_q_queue, -1, axis=1)
+                        ref_dq_queue = np.roll(ref_dq_queue, -1, axis=1)
 
-                tau_nmpc, q_nmpc_des, dq_nmpc_des = nmpc_controller.compute_torque(data, q, dq, ref_q_batch, ref_dq_batch)
+                        tk_new = t_traj + horizon_steps * dt
+                        qk = q_target.copy()
+                        qk_plus = q_target.copy()
+                        for j_idx, (amp, freq) in SINE_PARAMS.items():
+                            qk[j_idx] += amp * np.sin(2.0 * np.pi * freq * tk_new)
+                            qk_plus[j_idx] += amp * np.sin(2.0 * np.pi * freq * (tk_new + dt))
+                        
+                        ref_q_queue[:, -1] = qk
+                        # 新增的速度由中心差分计算: (q_{k+1} - q_{k-1}) / (2*dt)
+                        ref_dq_queue[:, -1] = (qk_plus - ref_q_queue[:, -2]) / (2.0 * dt)
 
-                tau_pd_fb = pdjoint_controller.compute_torque(q_nmpc_des, q, dq_nmpc_des, dq)
-                # =============================================================
-                # PD 跟随同一个关节空间目标（来自 IK 参考），保证混合控制一致
-                # =============================================================
-                q_des = ref_q_batch[:, 0].copy()
-                dq_des = ref_dq_batch[:, 0].copy()
+                q_des = ref_q_queue[:, 0].copy()
+                dq_des = ref_dq_queue[:, 0].copy()
 
-            # 计算各补偿项力矩
-            tau_pd = pdjoint_controller.compute_torque(q_des, q, dq_des, dq)
-            tau_fric = friction_compensator.compute_torque(dq) if fric_enabled else np.zeros(6)
+                # 为适配后续日志输出，计算对应目标状态的末端姿态和位置
+                data_plan.qpos[:6] = q_des
+                mujoco.mj_forward(model, data_plan)
+                x_des_pos = data_plan.site_xpos[ee_site_id].copy()
+                x_des_mat = data_plan.site_xmat[ee_site_id].reshape(3, 3).copy()
+
+                tau_nmpc, q_nmpc, dq_nmpc = nmpc_controller.compute_torque(data, q, dq, ref_q_queue)
 
             # =================================================================
-            # 拼接力矩: 前三轴 PD, 后三轴 NMPC
+            # 拼接力矩
             # =================================================================
             if traj_started:
-                # tau = np.concatenate([tau_pd[:3], tau_nmpc[3:]])
+                tau_pd = pdjoint_controller.compute_torque(q_nmpc, q, dq_nmpc, dq)
+                # tau = tau_nmpc + tau_pd
 
-                tau = tau_nmpc + 0.1 * tau_pd_fb 
+                tau = tau_nmpc + 0.3 * tau_pd
+
+                # tau_pd = pdjoint_controller.compute_torque(q_des, q, dq_des, dq)
                 # tau = tau_pd
             else:
+                tau_pd = pdjoint_controller.compute_torque(q_des, q, dq_des, dq)
                 tau = tau_pd
-            
-            # 叠加摩擦力补偿
-            tau += tau_fric
 
             if t_now > STABILIZE_END:
+                tau = np.clip(tau, -torque_limits, torque_limits)
                 ok = rtde_c.directTorque(tau.tolist(), False)
                 if not ok:
                     print("[ERROR] directTorque failed")
                     break
 
-            total_loop_count += 1
-            logger.update(
-                total_loop_count,
-                q_des,
-                q,
-                x_des_pos,
-                x_curr_pos,
-                tau,
-                extra={
-                    "tau_cmd": tau,
-                    "tau_pd": tau_pd,
-                    "tau_pd_fb": tau_pd_fb,
-                    "tau_nmpc": tau_nmpc,
-                    "tau_fric": tau_fric,
-                    "traj_started": float(traj_started),
-                },
-            )
+            if t_now > RESET_END:
+                # 轴角形式日志输出
+                target_quat = np.zeros(4)
+                mujoco.mju_mat2Quat(target_quat, x_des_mat.flatten())
+                if target_quat[0] < 0:
+                    target_quat *= -1.0
+                x_des_rot = np.zeros(3)
+                mujoco.mju_quat2Vel(x_des_rot, target_quat, 1.0)
+
+                curr_quat = np.zeros(4)
+                mujoco.mju_mat2Quat(curr_quat, x_curr_mat.flatten())
+                if curr_quat[0] < 0:
+                    curr_quat *= -1.0
+                x_curr_rot = np.zeros(3)
+                mujoco.mju_quat2Vel(x_curr_rot, curr_quat, 1.0)
+
+                err_pos, err_rot = compute_task_errors(x_des_pos, target_quat, x_curr_pos, x_curr_mat)
+
+                total_loop_count += 1
+                logger.update(
+                    total_loop_count,
+                    q_des,
+                    q,
+                    x_des_pos,
+                    x_curr_pos,
+                    tau,
+                    extra={
+                        "tau_pd": tau_pd,
+                        "tau_nmpc": tau_nmpc,
+                        "traj_started": float(traj_started),
+                        "x_des_rot": x_des_rot,
+                        "x_curr_rot": x_curr_rot,
+                        "err_pos": err_pos,
+                        "err_rot": err_rot,
+                    },
+                )
 
             if (not trajectory_points) or (t_now >= next_traj_sample):
                 trajectory_points.append(x_curr_pos.copy())

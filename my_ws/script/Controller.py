@@ -317,12 +317,22 @@ class NMPCController(BaseController):
                 pass
 
 
-    def compute_torque(self, data, q, dq, ref_q_batch, ref_dq_batch):
+    def compute_torque(self, data, q, dq, ref_q_batch):
         """
         计算 NMPC 力矩。
         ref_q_batch: [6, N+1] 参考关节位置序列
-        ref_dq_batch: [6, N+1] 参考关节速度序列
         """
+        # 计算关节速度序列 (中心差分)
+        ref_dq_batch = np.zeros_like(ref_q_batch)
+        for k in range(self.N):
+            if k == 0:
+                ref_dq_batch[:, k] = (ref_q_batch[:, 1] - ref_q_batch[:, 0]) / self.dt
+            elif k == self.N:
+                ref_dq_batch[:, k] = (ref_q_batch[:, k] - ref_q_batch[:, k-1]) / self.dt
+            else:
+                ref_dq_batch[:, k] = (ref_q_batch[:, k+1] - ref_q_batch[:, k-1]) / (2.0 * self.dt)
+        ref_dq_batch[:, self.N] = ref_dq_batch[:, self.N-1]
+
         # 1. 状态
         x0 = np.concatenate([q, dq])
         self.solver.set(0, "lbx", x0)
