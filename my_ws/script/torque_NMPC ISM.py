@@ -17,13 +17,17 @@ VIS_FREQ = 50.0
 
 # --- ISM 参数 ---
 SIGMA_LIMIT = 0.5
-# UMAX_ISM = np.array([20.0, 10.0, 15.0, 0.0, 500.0, 8000.0], dtype=float)
 
-UMAX_ISM = np.array([20.0, 2.0, 15.0, 100.0, 500.0, 8000.0], dtype=float)
+# UMAX_ISM = np.array([20.0, 2.0, 15.0, 100.0, 500.0, 8000.0], dtype=float)
+UMAX_ISM = np.array([20.0, 2.0, 15.0, 80.0, 400.0, 8000.0], dtype=float)
 
-K_TANH = np.array([5.0, 5.0, 5.0, 5.0, 3.0, 3.0], dtype=float)
+# K_TANH = np.array([5.0, 5.0, 5.0, 5.0, 3.0, 3.0], dtype=float)
+K_TANH = np.array([3.0, 3.0, 3.0, 3.0, 3.0, 3.0], dtype=float)
 
-# --- 正弦跟踪参数 ---
+
+# --- 轨迹控制模式及参数 ---
+TRAJ = "WORK_SPACE"  # 可选: "WORK_SPACE" 或 "JOINT_SPACE"
+
 # 字典格式：{关节索引: (振幅, 频率)}
 SINE_PARAMS = {
     0: (0.2, 0.2), # 0轴 振幅0.2 rad, 频率0.2 Hz
@@ -360,27 +364,48 @@ def main():
 
                 t_traj = t_now - RESET_END
 
-                # --- 改为生成关节正弦跟踪参考轨迹 ---
-                ref_q_batch = np.zeros((6, horizon_steps + 1))
-                ref_dq_batch = np.zeros((6, horizon_steps + 1))
-                for k in range(horizon_steps + 1):
-                    tk = t_traj + k * dt
-                    qk = q_target.copy()
-                    dqk = np.zeros(6)
-                    for j_idx, (amp, freq) in SINE_PARAMS.items():
-                        qk[j_idx] += amp * np.sin(2.0 * np.pi * freq * tk)
-                        dqk[j_idx] = amp * 2.0 * np.pi * freq * np.cos(2.0 * np.pi * freq * tk)
-                    ref_q_batch[:, k] = qk
-                    ref_dq_batch[:, k] = dqk
+                if TRAJ == "WORK_SPACE":
+                    x_des_pos, x_des_quat = get_traj(t_traj, x_des_pos_init, circle_radius, circle_omega)
+                    x_des_mat = np.zeros(9)
+                    mujoco.mju_quat2Mat(x_des_mat, x_des_quat)
+                    x_des_mat = x_des_mat.reshape(3, 3)
 
-                q_des = ref_q_batch[:, 0].copy()
-                dq_des = ref_dq_batch[:, 0].copy()
+                    ref_q_batch, ref_dq_batch = build_reference_batch(
+                        model,
+                        data_ik,
+                        ee_site_id,
+                        q,
+                        t_traj,
+                        x_des_pos_init,
+                        circle_radius,
+                        circle_omega,
+                        horizon_steps,
+                        dt,
+                    )
+                    q_des = ref_q_batch[:, 0].copy()
+                    dq_des = ref_dq_batch[:, 0].copy()
+                else:
+                    # --- 改为生成关节正弦跟踪参考轨迹 ---
+                    ref_q_batch = np.zeros((6, horizon_steps + 1))
+                    ref_dq_batch = np.zeros((6, horizon_steps + 1))
+                    for k in range(horizon_steps + 1):
+                        tk = t_traj + k * dt
+                        qk = q_target.copy()
+                        dqk = np.zeros(6)
+                        for j_idx, (amp, freq) in SINE_PARAMS.items():
+                            qk[j_idx] += amp * np.sin(2.0 * np.pi * freq * tk)
+                            dqk[j_idx] = amp * 2.0 * np.pi * freq * np.cos(2.0 * np.pi * freq * tk)
+                        ref_q_batch[:, k] = qk
+                        ref_dq_batch[:, k] = dqk
 
-                # 为适配后续日志输出，计算对应目标状态的末端姿态和位置
-                data_plan.qpos[:6] = q_des
-                mujoco.mj_forward(model, data_plan)
-                x_des_pos = data_plan.site_xpos[ee_site_id].copy()
-                x_des_mat = data_plan.site_xmat[ee_site_id].reshape(3, 3).copy()
+                    q_des = ref_q_batch[:, 0].copy()
+                    dq_des = ref_dq_batch[:, 0].copy()
+
+                    # 为适配后续日志输出，计算对应目标状态的末端姿态和位置
+                    data_plan.qpos[:6] = q_des
+                    mujoco.mj_forward(model, data_plan)
+                    x_des_pos = data_plan.site_xpos[ee_site_id].copy()
+                    x_des_mat = data_plan.site_xmat[ee_site_id].reshape(3, 3).copy()
 
                 tau_nmpc, _, _ = nmpc_controller.compute_torque(data, q, dq, ref_q_batch, ref_dq_batch)
 
@@ -425,15 +450,15 @@ def main():
             # 拼接力矩: 前三轴 PD, 后三轴 NMPC
             # =================================================================
             if traj_started:
-                # tau = np.concatenate([tau_pd[:3], tau_nmpc[3:]])
-
-                tau = tau_nmpc + tau_ism
                 # tau = tau_nmpc
-                # tau = tau_nmpc + 0.1 * tau_pd
+                tau = tau_nmpc + tau_ism
+                # tau = tau_nmpc + 1.0 * tau_pd
+                # tau = tau_pd
             else:
                 tau = tau_pd
 
             if t_now > STABILIZE_END:
+                tau = np.clip(tau, -torque_limits, torque_limits)
                 ok = rtde_c.directTorque(tau.tolist(), False)
                 if not ok:
                     print("[ERROR] directTorque failed")
@@ -466,7 +491,6 @@ def main():
                     x_curr_pos,
                     tau,
                     extra={
-                        "tau_cmd": tau,
                         "tau_pd": tau_pd,
                         "tau_nmpc": tau_nmpc,
                         "tau_ism": tau_ism,
