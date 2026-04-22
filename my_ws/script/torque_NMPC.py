@@ -9,9 +9,8 @@ import yaml
 import mujoco
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
-from Controller import PDJointController, NMPCController
+from Controller import PDJointController, NMPCController, FrictionCompensator
 from visualization import VisualizationWorker, UDPLogger
-
 
 VIS_FREQ = 50.0
 
@@ -225,8 +224,10 @@ def main():
     data_plan = mujoco.MjData(model)
     data_ik = mujoco.MjData(model)
     
+
     pdjoint_controller = PDJointController(model=model, kp=kp, kd=kd, torque_limits=torque_limits)
     nmpc_controller = NMPCController(model=model, config_path=args.config, rebuild=rebuild_solver)
+    friction_compensator = FrictionCompensator(param_dir="config", enabled=True, comp_factor=1.0)
     
     ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
     if ee_site_id == -1:
@@ -463,17 +464,18 @@ def main():
             # =================================================================
             # 拼接力矩
             # =================================================================
+            tau_fric = friction_compensator.compute_torque(dq)
+
             if traj_started:
                 tau_pd = pdjoint_controller.compute_torque(q_nmpc, q, dq_nmpc, dq)
-                # tau = tau_nmpc + tau_pd
-
-                tau = tau_nmpc + 0.3 * tau_pd
+                # tau = tau_nmpc + 0.3 * tau_pd + tau_fric
+                tau = tau_nmpc + 0.0 * tau_fric + 0.3 * tau_pd
 
                 # tau_pd = pdjoint_controller.compute_torque(q_des, q, dq_des, dq)
                 # tau = tau_pd
             else:
                 tau_pd = pdjoint_controller.compute_torque(q_des, q, dq_des, dq)
-                tau = tau_pd
+                tau = tau_pd +  0.9 * tau_fric
 
             if t_now > STABILIZE_END:
                 tau = np.clip(tau, -torque_limits, torque_limits)

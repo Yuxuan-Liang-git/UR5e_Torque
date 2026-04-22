@@ -1,0 +1,29 @@
+joint_id: 4
+source_csv: /home/amdt/temp/Data/joint4_fric.csv
+method: symmetric_position_same_velocity_sum
+q0: 0.0
+Friction:
+  model: tau = B * qd + Fc * tanh(qd / epsilon)
+  B: 1.0566105495177978
+  Fc: 2.0552573418443467
+  Fc_dir: 2.0552573418443467
+  Fc_rev: 2.0552573418443467
+  epsilon: 0.09325151531645781
+fit:
+  two_friction_rmse: 0.18583653391602536
+  num_points: 194
+  q_bin: 0.01
+  v_bin: 0.04
+  min_velocity: 0.08
+  min_pair_samples: 4
+  covariance:
+  - - 0.0004729234804065961
+    - -0.0003649521873535164
+    - 6.125550629234377e-05
+  - - -0.0003649521873535165
+    - 0.0003126735757854151
+    - -4.6475392987280214e-05
+  - - 6.125550629234378e-05
+    - -4.6475392987280214e-05
+    - 4.151428108595472e-05
+timestamp: '2026-04-22 19:06:15'
