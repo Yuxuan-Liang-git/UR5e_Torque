@@ -179,6 +179,17 @@ def load_init_q(init_pos_path: Path):
         print(f"[WARN] Failed to read init_pos file: {e}")
         return None
 
+
+def resolve_config_path(config_path: Path, path_value: str | Path) -> Path:
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    candidate = Path.cwd() / path
+    if candidate.exists():
+        return candidate
+    return config_path.resolve().parent.parent / path
+
+
 def main():
     keep_running = [True]
     def signal_handler(sig, frame):
@@ -215,9 +226,14 @@ def main():
     kp = np.array(pdjoint_cfg["kp"], dtype=float)
     kd = np.array(pdjoint_cfg["kd"], dtype=float)
 
-    xml_path = Path("script/ur5e_gripper/scene.xml")
+    sim_cfg = cfg.get("simulation", {})
+    sim_mjcf_path = sim_cfg.get("mjcf_path")
+    if sim_mjcf_path is None:
+        raise ValueError("simulation.mjcf_path must be set in ctrl_config.yaml")
+    xml_path = resolve_config_path(Path(args.config), sim_mjcf_path)
     if not xml_path.exists():
-        xml_path = Path("script/universal_robots_ur5e/scene.xml")
+        raise FileNotFoundError(f"Simulation MJCF file not found: {xml_path}")
+    print(f"[INFO] Loading MuJoCo simulation model: {xml_path}")
 
     model = mujoco.MjModel.from_xml_path(str(xml_path))
     data = mujoco.MjData(model)
@@ -266,11 +282,12 @@ def main():
     # =========================================================================
     print("[INFO] Warm-starting NMPC solver...")
     x0_warm = np.concatenate([q_target, np.zeros(6)])
+    gravity_warm = nmpc_controller.compute_gravity_torque(q_target)
     for k in range(horizon_steps + 1):
         nmpc_controller.solver.set(k, "x", x0_warm)
     for k in range(horizon_steps):
-        # 使用真实的重力补偿项作为控制猜测，避免解退化
-        nmpc_controller.solver.set(k, "u", data.qfrc_bias[:6])
+        # 使用 NMPC 动力学模型对应的重力项作为控制猜测，避免解退化
+        nmpc_controller.solver.set(k, "u", gravity_warm)
     print("[INFO] Warm-start completed.")
     # =========================================================================
 
@@ -343,9 +360,9 @@ def main():
                     # 1. 获取当前机器人的真实状态
                     x_current = np.concatenate([q, dq])
                     
-                    # 2. 构造当前实际生效的总力矩 (PD 输出 + 重力补偿)
+                    # 2. 构造当前实际生效的总力矩猜测 (PD 输出 + NMPC 模型重力补偿)
                     # 因为 NMPC 内部动力学 (ABA) 需要的是包含重力的总力矩
-                    u_current = tau_pd + data.qfrc_bias[:6]
+                    u_current = tau_pd + nmpc_controller.compute_gravity_torque(q)
                     
                     # 3. 强制覆盖 NMPC 预测视野内的所有猜测点,防止突变
                     for k in range(horizon_steps + 1):
@@ -469,7 +486,7 @@ def main():
             if traj_started:
                 tau_pd = pdjoint_controller.compute_torque(q_nmpc, q, dq_nmpc, dq)
                 # tau = tau_nmpc + 0.3 * tau_pd + tau_fric
-                tau = tau_nmpc + 0.0 * tau_fric + 0.3 * tau_pd
+                tau = tau_nmpc + 0.5 * tau_fric + 0.0 * tau_pd
 
                 # tau_pd = pdjoint_controller.compute_torque(q_des, q, dq_des, dq)
                 # tau = tau_pd

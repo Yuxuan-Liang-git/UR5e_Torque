@@ -12,19 +12,31 @@ The dynamics are computed via the Articulated-Body Algorithm (ABA):
 import sys
 sys.path = [p for p in sys.path if "/opt/ros" not in p and ".local" not in p]
 
+import argparse
 from pathlib import Path
 from acados_template import AcadosModel
 import casadi as ca
 import pinocchio as pin
 import pinocchio.casadi as cpin
+import yaml
 
 _HERE = Path(__file__).parent.parent
-_MJCF = _HERE /"script" / "universal_robots_ur5e" / "ur5e.xml"
 
 
-def export_ur5e_model():
+def resolve_repo_path(path_value: str | Path) -> Path:
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return _HERE / path
+
+
+def export_ur5e_model(mjcf_path: str | Path, frame_name: str = "attachment_site"):
     # ── Pinocchio model ────────────────────────────────────────────────────────
-    pin_model = pin.buildModelFromMJCF(str(_MJCF))
+    mjcf_path = resolve_repo_path(mjcf_path)
+    if not mjcf_path.exists():
+        raise FileNotFoundError(f"NMPC MJCF file not found: {mjcf_path}")
+
+    pin_model = pin.buildModelFromMJCF(str(mjcf_path))
     cmodel    = cpin.Model(pin_model)
     cdata     = cmodel.createData()
 
@@ -59,7 +71,9 @@ def export_ur5e_model():
     # ── Forward kinematics functions (used externally for cost / plotting) ────
     cpin.forwardKinematics(cmodel, cdata, q)
     cpin.updateFramePlacements(cmodel, cdata)
-    ee_id = pin_model.getFrameId("attachment_site")
+    ee_id = pin_model.getFrameId(frame_name)
+    if ee_id >= pin_model.nframes:
+        raise ValueError(f"Frame '{frame_name}' not found in NMPC MJCF: {mjcf_path}")
     ee_pos = cdata.oMf[ee_id].translation          # 3-vec  (Pinocchio frame)
     ee_rot = cdata.oMf[ee_id].rotation             # 3×3    (Pinocchio frame)
 
@@ -70,7 +84,19 @@ def export_ur5e_model():
 
 
 if __name__ == "__main__":
-    model, f_pos, f_rot, nq, nv = export_ur5e_model()
+    parser = argparse.ArgumentParser(description="Test UR5e Acados model export")
+    parser.add_argument("--config", default="config/ctrl_config.yaml", help="Control config file")
+    args = parser.parse_args()
+
+    config_path = resolve_repo_path(args.config)
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    nmpc_cfg = cfg.get("nmpc_controller", {})
+
+    model, f_pos, f_rot, nq, nv = export_ur5e_model(
+        nmpc_cfg["mjcf_path"],
+        nmpc_cfg.get("frame_name", "attachment_site"),
+    )
     print(f"Model name : {model.name}")
     print(f"State dim  : {model.x.size()[0]}  (nq={nq}, nv={nv})")
     print(f"Input dim  : {model.u.size()[0]}")

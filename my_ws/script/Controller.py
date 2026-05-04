@@ -4,8 +4,9 @@ import mujoco
 from acados_template import AcadosOcpSolver
 import yaml
 
-from export_model_ur5e import export_ur5e_model
+from export_model_ur5e import export_ur5e_model, resolve_repo_path
 import casadi as ca
+import pinocchio as pin
 from acados_template import AcadosOcp
 import os
 from pathlib import Path
@@ -214,8 +215,15 @@ class NMPCController(BaseController):
         self.dt = self.Tf / self.N
         self.torque_limits = np.array(nmpc_cfg.get("torque_limits", [150, 150, 150, 28, 28, 28]))
 
-        # 2. 导出模型并获取运动学函数
-        acados_model, f_fk_pos, f_fk_rot, nq, nv = export_ur5e_model()
+        # 2. 导出 NMPC/Pinocchio 模型并获取运动学函数
+        nmpc_mjcf_path = nmpc_cfg.get("mjcf_path")
+        if nmpc_mjcf_path is None:
+            raise ValueError("nmpc_controller.mjcf_path must be set in config")
+        frame_name = nmpc_cfg.get("frame_name", "attachment_site")
+        acados_model, f_fk_pos, f_fk_rot, nq, nv = export_ur5e_model(nmpc_mjcf_path, frame_name)
+        self.nmpc_mjcf_path = resolve_repo_path(nmpc_mjcf_path)
+        self.pin_model = pin.buildModelFromMJCF(str(self.nmpc_mjcf_path))
+        self.pin_data = self.pin_model.createData()
         self.nx = nq + nv
         self.nu = nq
 
@@ -316,6 +324,15 @@ class NMPCController(BaseController):
             except Exception:
                 pass
 
+    def compute_gravity_torque(self, q):
+        return np.asarray(
+            pin.computeGeneralizedGravity(
+                self.pin_model,
+                self.pin_data,
+                np.asarray(q, dtype=float),
+            )
+        ).flatten()[:6]
+
 
     def compute_torque(self, data, q, dq, ref_q_batch):
         """
@@ -359,7 +376,7 @@ class NMPCController(BaseController):
         
         # 3. 力矩限幅与重力扣除
         u_nmpc = np.clip(u_nmpc, -self.torque_limits, self.torque_limits)
-        tau_nmpc_ff = u_nmpc - data.qfrc_bias[:6]
+        tau_nmpc_ff = u_nmpc - self.compute_gravity_torque(q)
         
         # 返回前馈力矩、期望位置、期望速度
         return np.asarray(tau_nmpc_ff).flatten(), q_nmpc_des, dq_nmpc_des
