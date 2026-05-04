@@ -29,9 +29,15 @@ TORQUE_LIMITS = np.array([20.0, 20.0, 20.0, 10.0, 10.0, 10.0], dtype=float)
 # --- SMC 控制器参数 ---
 # sigma = de + lambda * e
 lambda_SMC = 10.0      # 滑模面参数 lambda
-K_SMC = np.array([100.0, 100.0, 100.0, 30.0, 30.0, 30.0], dtype=float)           # 滑模指数收敛增益
-U_SMC = 1.0 * np.array([5.0, 5.0, 5.0, 1.0, 1.0, 1.0], dtype=float) # 切换增益
-TANH_BETA = 10.0   # tanh 函数斜率
+K_SMC = np.array([50.0, 50.0, 50.0, 10.0, 10.0, 10.0], dtype=float)           # 滑模指数收敛增益
+U_SMC = 0.0 * np.array([15.0, 8.0, 8.0, 2.0, 2.0, 5.0], dtype=float) # 切换增益
+TANH_BETA = 40.0   # tanh 函数斜率
+
+
+# lambda_SMC = 10.0      # 滑模面参数 lambda
+# K_SMC = np.array([100.0, 100.0, 100.0, 30.0, 30.0, 30.0], dtype=float)           # 滑模指数收敛增益
+# U_SMC = 0.0 * np.array([6.0, 6.0, 6.0, 2.0, 2.0, 2.0], dtype=float) # 切换增益
+# TANH_BETA = 10.0   # tanh 函数斜率
 
 # --- 全局停止事件 ---
 stop_event = threading.Event()
@@ -42,7 +48,7 @@ def signal_handler(sig, frame):
 
 # --- 轨迹参数 ---
 CIRCLE_RADIUS = 0.06
-CIRCLE_OMEGA = 0.8
+CIRCLE_OMEGA = 1.2
 CONTROL_DT = 0.002  # 500Hz
 VIS_FREQ = 50.0
 
@@ -207,6 +213,9 @@ def main():
 
             q = np.array(rtde_r.getActualQ(), dtype=float)
             dq = np.array(rtde_r.getActualQd(), dtype=float)
+            
+            # getTargetMoment() 返回的是UR内部计算的重力/前馈补偿目标力矩，不包含我们下发的 directTorque
+            tau_actual = np.array(rtde_r.getTargetMoment(), dtype=float)
 
             data.qpos[:6] = q
             data.qvel[:6] = dq
@@ -257,17 +266,7 @@ def main():
                 
                 # 为阻抗控制计算任务空间速度误差
                 dx_des = np.concatenate([dx_des_pos, np.zeros(3)]) # 旋转速度暂设为 0
-
-            # --- 核心控制逻辑 ---
-            # 计算雅可比以支持任务空间操作
-            jacp = np.zeros((3, model.nv))
-            jacr = np.zeros((3, model.nv))
-            mujoco.mj_jacSite(model, data, jacp, jacr, ee_site_id)
-            J6 = np.vstack([jacp[:, :6], jacr[:, :6]])
-            dx_curr = J6 @ dq
-            pos_err, rot_err, _ = compute_task_errors(x_des_pos, x_des_quat, x_curr_pos, x_curr_mat)
-            e6 = np.concatenate([pos_err, rot_err])
-            
+                
             u_nom = np.zeros(6)
             u_smc = np.zeros(6)
             sigma = np.zeros(6)
@@ -293,7 +292,9 @@ def main():
             tau = np.clip(tau, -TORQUE_LIMITS, TORQUE_LIMITS)
 
             if t_now > STABILIZE_END:
+                tau = np.zeros(6)
                 ok = rtde_c.directTorque(tau.tolist(), False)
+                # ok = rtde_c.directTorque(tau.tolist(), False)
                 if not ok:
                     print("[ERROR] directTorque failed")
                     break
@@ -308,7 +309,8 @@ def main():
                 "u_smc": u_smc,
                 "u_nom": u_nom,
                 "sigma": sigma,
-                "rot_err": rot_err
+                "rot_err": rot_err,
+                "tau_actual": tau_actual
             }
             if t_now >= RESET_END:
                logger.update(total_loop_count, q_des, q, x_des_pos, x_curr_pos, tau, extra=extra_data)

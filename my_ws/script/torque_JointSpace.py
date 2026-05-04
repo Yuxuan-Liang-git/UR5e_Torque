@@ -23,6 +23,11 @@ from visualization import VisualizationWorker, UDPLogger
 
 VIS_FREQ = 50.0
 
+# --- 轨迹控制模式及参数 ---
+TRAJ = "JOINT_TRAJ"  # 可选: "WORK_SPACE" 或 "JOINT_TRAJ"
+TRAJ_FILE = "final_exec_213643.csv"
+TRAJ_SPEED = 1.5  # 轨迹播放倍速，例如 1.5 表示 1.5 倍速跟踪
+
 
 def get_traj_pos(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> np.ndarray:
     return x_des_pos_init + np.array([
@@ -124,6 +129,70 @@ def map_task_target_to_joint(
     return q_curr + dq_cmd
 
 
+class JointTrajectoryReference:
+    """Load a recorded joint trajectory and sample q/dq references."""
+
+    def __init__(self, csv_path: Path, speed: float = 1.0):
+        if speed <= 0.0:
+            raise ValueError("TRAJ_SPEED must be > 0")
+        if not csv_path.exists():
+            raise FileNotFoundError(f"Joint trajectory file not found: {csv_path}")
+
+        table = np.genfromtxt(csv_path, delimiter=",", names=True, dtype=float)
+        if table.size == 0:
+            raise ValueError(f"Joint trajectory file is empty: {csv_path}")
+        table = np.atleast_1d(table)
+
+        names = table.dtype.names or ()
+        required = ["timestamp", "q1", "q2", "q3", "q4", "q5", "q6"]
+        missing = [name for name in required if name not in names]
+        if missing:
+            raise ValueError(f"Missing columns in {csv_path}: {missing}")
+
+        raw_time = np.asarray(table["timestamp"], dtype=float)
+        raw_q = np.column_stack([np.asarray(table[f"q{i}"], dtype=float) for i in range(1, 7)])
+
+        finite_mask = np.isfinite(raw_time) & np.all(np.isfinite(raw_q), axis=1)
+        raw_time = raw_time[finite_mask]
+        raw_q = raw_q[finite_mask]
+        if raw_time.size < 2:
+            raise ValueError(f"Need at least two valid trajectory samples: {csv_path}")
+
+        order = np.argsort(raw_time)
+        raw_time = raw_time[order]
+        raw_q = raw_q[order]
+
+        keep = np.concatenate(([True], np.diff(raw_time) > 0.0))
+        raw_time = raw_time[keep]
+        raw_q = raw_q[keep]
+        if raw_time.size < 2:
+            raise ValueError(f"Need at least two unique timestamps: {csv_path}")
+
+        self.time = raw_time - raw_time[0]
+        self.q = raw_q
+        self.speed = float(speed)
+        self.duration = float(self.time[-1])
+
+        self.dq = np.zeros_like(self.q)
+        self.dq[0] = (self.q[1] - self.q[0]) / (self.time[1] - self.time[0])
+        self.dq[-1] = (self.q[-1] - self.q[-2]) / (self.time[-1] - self.time[-2])
+        for i in range(1, self.time.size - 1):
+            self.dq[i] = (self.q[i + 1] - self.q[i - 1]) / (self.time[i + 1] - self.time[i - 1])
+
+    @property
+    def q0(self) -> np.ndarray:
+        return self.q[0].copy()
+
+    def _scaled_time(self, t: float) -> float:
+        return float(np.clip(t * self.speed, 0.0, self.duration))
+
+    def sample(self, t: float) -> tuple[np.ndarray, np.ndarray]:
+        tk = self._scaled_time(t)
+        q = np.array([np.interp(tk, self.time, self.q[:, j]) for j in range(6)], dtype=float)
+        dq = self.speed * np.array([np.interp(tk, self.time, self.dq[:, j]) for j in range(6)], dtype=float)
+        return q, dq
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="UR5e Joint-Space PD Torque Control")
     parser.add_argument("--robot-ip", default="192.168.56.101", help="UR robot IP")
@@ -169,6 +238,16 @@ def main():
     traj_cfg = cfg.get("trajectory", {})
     circle_radius = float(traj_cfg.get("circle_radius", 0.08))
     circle_omega = float(traj_cfg.get("circle_omega", 0.8))
+    joint_traj_ref = None
+    if TRAJ == "JOINT_TRAJ":
+        traj_path = Path(args.config).resolve().parent / "trajectory" / TRAJ_FILE
+        joint_traj_ref = JointTrajectoryReference(traj_path, speed=TRAJ_SPEED)
+        print(
+            f"[INFO] Loaded joint trajectory {traj_path} "
+            f"({joint_traj_ref.time.size} samples, {joint_traj_ref.duration:.3f}s, speed={TRAJ_SPEED:.3f}x)"
+        )
+    elif TRAJ != "WORK_SPACE":
+        raise ValueError(f"Unsupported TRAJ mode: {TRAJ}")
 
     pdjoint_cfg = cfg.get("pdjoint_controller")
     if pdjoint_cfg is None:
@@ -217,6 +296,10 @@ def main():
     else:
         q_target = q_actual0.copy()
         print("[WARN] init_pos not found/invalid, holding current joints")
+
+    if TRAJ == "JOINT_TRAJ":
+        q_target = joint_traj_ref.q0
+        print(f"[INFO] Reset target set to the first point of {TRAJ_FILE}")
 
     data.qpos[:6] = q_target
     mujoco.mj_forward(model, data)
@@ -288,12 +371,23 @@ def main():
                     traj_started = True
 
                 t_traj = t_now - RESET_END
-                x_des_pos, x_des_quat = get_traj(t_traj, x_des_pos_init, circle_radius, circle_omega)
-                x_des_mat = np.zeros(9)
-                mujoco.mju_quat2Mat(x_des_mat, x_des_quat)
-                x_des_mat = x_des_mat.reshape(3, 3)
-                q_des = map_task_target_to_joint(model, data, ee_site_id, x_des_pos, x_des_quat, q)
-                dq_des = np.zeros(6)
+                if TRAJ == "WORK_SPACE":
+                    x_des_pos, x_des_quat = get_traj(t_traj, x_des_pos_init, circle_radius, circle_omega)
+                    x_des_mat = np.zeros(9)
+                    mujoco.mju_quat2Mat(x_des_mat, x_des_quat)
+                    x_des_mat = x_des_mat.reshape(3, 3)
+                    q_des = map_task_target_to_joint(model, data, ee_site_id, x_des_pos, x_des_quat, q)
+                    dq_des = np.zeros(6)
+                elif TRAJ == "JOINT_TRAJ":
+                    q_des, dq_des = joint_traj_ref.sample(t_traj)
+
+                    data_plan.qpos[:6] = q_des
+                    data_plan.qvel[:6] = dq_des
+                    mujoco.mj_forward(model, data_plan)
+                    x_des_pos = data_plan.site_xpos[ee_site_id].copy()
+                    x_des_mat = data_plan.site_xmat[ee_site_id].reshape(3, 3).copy()
+                else:
+                    raise ValueError(f"Unsupported TRAJ mode: {TRAJ}")
 
             tau = joint_controller.compute_torque(q_des, q, dq_des, dq)
 

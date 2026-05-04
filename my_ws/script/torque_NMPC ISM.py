@@ -16,10 +16,17 @@ from visualization import VisualizationWorker, UDPLogger
 VIS_FREQ = 50.0
 
 # --- ISM 参数 ---
-SIGMA_LIMIT = 0.5
+# SIGMA_LIMIT = 0.9
+
+SIGMA_LIMIT = 100.0
+
 
 # UMAX_ISM = np.array([20.0, 2.0, 15.0, 100.0, 500.0, 8000.0], dtype=float)
-UMAX_ISM = np.array([20.0, 2.0, 15.0, 80.0, 400.0, 8000.0], dtype=float)
+# UMAX_ISM = np.array([20.0, 2.0, 15.0, 80.0, 100.0, 8000.0], dtype=float)
+
+UMAX_ISM = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 15000.0], dtype=float)
+# 低通滤波系数，越大越平滑但响应越慢
+ALPHA_ISM = 0.01
 
 # K_TANH = np.array([5.0, 5.0, 5.0, 5.0, 3.0, 3.0], dtype=float)
 K_TANH = np.array([3.0, 3.0, 3.0, 3.0, 3.0, 3.0], dtype=float)
@@ -30,11 +37,11 @@ TRAJ = "WORK_SPACE"  # 可选: "WORK_SPACE" 或 "JOINT_SPACE"
 
 # 字典格式：{关节索引: (振幅, 频率)}
 SINE_PARAMS = {
-    0: (0.2, 0.2), # 0轴 振幅0.2 rad, 频率0.2 Hz
-    1: (0.2, 0.2),
-    2: (0.2, 0.2),
-    3: (0.5, 0.5),
-    4: (0.5, 0.5), # 4轴 振幅0.1 rad, 频率0.5 Hz
+    # 0: (0.2, 0.2), # 0轴 振幅0.2 rad, 频率0.2 Hz
+    # 1: (0.2, 0.2),
+    # 2: (0.2, 0.2),
+    # 3: (0.5, 0.5),
+    # 4: (0.5, 0.5), # 4轴 振幅0.1 rad, 频率0.5 Hz
     5: (0.5, 0.5), # 5轴 振幅0.1 rad, 频率0.5 Hz
 }
 
@@ -303,6 +310,12 @@ def main():
     freq_start_time = time.perf_counter()
     freq_loop_count = 0
 
+    tau_nmpc = np.zeros(6)
+    u_ISM = np.zeros(6)
+    u_ISM_fil = np.zeros(6)
+    x_des_quat = np.zeros(4)
+    x_des_pos = np.zeros(3)
+
 
     try:
         while keep_running[0]:
@@ -321,9 +334,6 @@ def main():
             x_curr_pos = data.site_xpos[ee_site_id].copy()
             x_curr_mat = data.site_xmat[ee_site_id].reshape(3, 3).copy()
 
-            tau_nmpc = np.zeros(6)
-            x_des_quat = np.zeros(4)
-            x_des_pos = np.zeros(3)
 
 
             if t_now <= STABILIZE_END:
@@ -423,36 +433,44 @@ def main():
             # --- 积分滑模面 ISM 计算 ---
             # 名义控制力矩产生的加速度
             u = M_inv @ tau_nmpc
-            u_ISM = np.zeros(6)
+   
             
 
             if traj_started:
                 if not ism_init:
                     dq_prev = dq.copy()
                     ism_init = True
+                # 低通滤波后的滑模面与控制输入
+                u_ISM = -UMAX_ISM * np.sign(sigma)
+                # u_ISM = -UMAX_ISM * np.tanh(K_TANH * sigma)
+                u_ISM_fil = ALPHA_ISM * u_ISM_fil + (1.0 - ALPHA_ISM) * u_ISM
+
                 # 1. 实际速度的变化量
                 delta_dq_actual = dq - dq_prev
                 # 更新前一个速度值
                 dq_prev = dq.copy()
                 # 2. 名义加速度带来的期望速度变化量
-                delta_dq_nom = u * dt
+                delta_dq_nom = (u + u_ISM_fil - u_ISM) * dt
+
+                # delta_dq_nom = u * dt
                 # 3. 增量式更新滑模面
                 sigma += (delta_dq_actual - delta_dq_nom)
 
-                sigma = np.clip(sigma, -SIGMA_LIMIT, SIGMA_LIMIT)
+                # sigma = np.clip(sigma, -SIGMA_LIMIT, SIGMA_LIMIT)
 
-                u_ISM = -UMAX_ISM * np.tanh(K_TANH * sigma)
-                tau_ism = M6_diag @ u_ISM
+                tau_ism = M6_diag @ u_ISM_fil
             else:
                 tau_ism = np.zeros(6)
 
+
+            
             # =================================================================
             # 拼接力矩: 前三轴 PD, 后三轴 NMPC
             # =================================================================
             if traj_started:
-                # tau = tau_nmpc
-                tau = tau_nmpc + tau_ism
-                # tau = tau_nmpc + 1.0 * tau_pd
+                tau = tau_nmpc
+                # tau = tau_nmpc + tau_ism
+                # tau = tau_nmpc + 0.2 * tau_pd
                 # tau = tau_pd
             else:
                 tau = tau_pd
@@ -496,6 +514,7 @@ def main():
                         "tau_ism": tau_ism,
                         "sigma": sigma,
                         "u_ISM": u_ISM,
+                        "u_ISM_fil": u_ISM_fil,
                         "traj_started": float(traj_started),
                         "x_des_rot": x_des_rot,
                         "x_curr_rot": x_curr_rot,

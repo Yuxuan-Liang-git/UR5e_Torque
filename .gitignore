@@ -4,4 +4,7 @@ install/
 log/
 c_generated_code/
 my_ws/c_generated_code/
+my_ws/script/__pycache__
 acados_ocp_ur5e.json
+joint_test/__pycache__/
+joint_test/tools/__pycache__/

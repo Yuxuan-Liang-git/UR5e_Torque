@@ -168,14 +168,27 @@ def main():
             q_des = q_target.copy()
             
             # Joints track the trajectory loaded from CSV
-            # q_des[0] = np.interp(t_traj, t_traj_data, q1_data)
+            A0 = 0.4
+            A1 = 0.2
+            T_end = 20.0
+            k = 5  # 周期倍数 (完成的完整循环数)
+            f0 = k / T_end  # 由 T=20s 计算得到基频
+            
+            if t_traj <= T_end:
+                q_des[0] = q_target[0] + A0 * np.sin(2.0 * np.pi * f0 * t_traj)
+                + A1 * np.sin(2.0 * np.pi * 3.0 * f0 * t_traj)  # 添加3倍频的谐波成分
+                dq_des[0] = A0 * 2.0 * np.pi * f0 * np.cos(2.0 * np.pi * f0 * t_traj)
+                + A1 * 2.0 * np.pi * 3.0 * f0 * np.cos(2.0 * np.pi * 3.0 * f0 * t_traj)
+            else:
+                q_des[0] = q_target[0]
+                dq_des[0] = 0.0
+                
             q_des[1] = np.interp(t_traj, t_traj_data, q2_data)
             q_des[2] = np.interp(t_traj, t_traj_data, q3_data)
             q_des[3] = np.interp(t_traj, t_traj_data, q4_data)
             q_des[4] = np.interp(t_traj, t_traj_data, q5_data)
             q_des[5] = np.interp(t_traj, t_traj_data, q6_data)
             
-            # dq_des[0] = np.interp(t_traj, t_traj_data, qd1_data)
             dq_des[1] = np.interp(t_traj, t_traj_data, qd2_data)
             dq_des[2] = np.interp(t_traj, t_traj_data, qd3_data)
             dq_des[3] = np.interp(t_traj, t_traj_data, qd4_data)

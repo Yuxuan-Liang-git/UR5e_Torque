@@ -1,0 +1,127 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mujoco model="ur5e">
+  <compiler angle="radian" meshdir="assets" autolimits="true" />
+  <option integrator="implicitfast" />
+  <default>
+    <default class="ur5e">
+      <default class="visual">
+        <geom type="mesh" contype="0" conaffinity="0" group="2" />
+      </default>
+      <default class="collision">
+        <geom type="capsule" group="3" />
+        <default class="eef_collision">
+          <geom type="cylinder" />
+        </default>
+      </default>
+      <joint axis="0 1 0" range="-6.28319 6.28319" />
+      <default class="joint_limited">
+        <joint range="-3.1415 3.1415" />
+      </default>
+      <default class="position">
+        <position ctrlrange="-6.2831 6.2831" kp="2000" kv="100" forcerange="-150 150" />
+        <default class="position_limited">
+          <position ctrlrange="-3.1415 3.1415" />
+        </default>
+        <default class="position_small">
+          <position kp="500" kv="25" forcerange="-28 28" />
+        </default>
+      </default>
+    </default>
+  </default>
+  <asset>
+    <material name="black" rgba="0.033 0.033 0.033 1" />
+    <material name="jointgray" rgba="0.278 0.278 0.278 1" />
+    <material name="linkgray" rgba="0.82 0.82 0.82 1" />
+    <material name="urblue" rgba="0.49 0.678 0.8 1" />
+    <mesh file="base_0.obj" />
+    <mesh file="base_1.obj" />
+    <mesh file="shoulder_0.obj" />
+    <mesh file="shoulder_1.obj" />
+    <mesh file="shoulder_2.obj" />
+    <mesh file="upperarm_0.obj" />
+    <mesh file="upperarm_1.obj" />
+    <mesh file="upperarm_2.obj" />
+    <mesh file="upperarm_3.obj" />
+    <mesh file="forearm_0.obj" />
+    <mesh file="forearm_1.obj" />
+    <mesh file="forearm_2.obj" />
+    <mesh file="forearm_3.obj" />
+    <mesh file="wrist1_0.obj" />
+    <mesh file="wrist1_1.obj" />
+    <mesh file="wrist1_2.obj" />
+    <mesh file="wrist2_0.obj" />
+    <mesh file="wrist2_1.obj" />
+    <mesh file="wrist2_2.obj" />
+    <mesh file="wrist3.obj" />
+  </asset>
+  <worldbody>
+    <body name="base" quat="1 0 0 1" childclass="ur5e">
+      <inertial mass="4" pos="0 0 0" diaginertia="0.00443333156 0.00443333156 0.0072" />
+      <geom mesh="base_0" material="black" class="visual" />
+      <geom mesh="base_1" material="jointgray" class="visual" />
+      <body name="shoulder_link" pos="0 0 0.163">
+        <inertial mass="3.76314433393469" pos="3.48564872801904e-09 6.45488025775008e-06 0.00349615578492665" fullinertia="0.00238114580899604 0.00238114530333087 1.35988701424046e-07 0 0 0" />
+        <joint name="shoulder_pan" axis="0 0 1" frictionloss="13.3198786870032" damping="9.57508767926301" />
+        <geom mesh="shoulder_0" material="urblue" class="visual" />
+        <geom mesh="shoulder_1" material="black" class="visual" />
+        <geom mesh="shoulder_2" material="jointgray" class="visual" />
+        <geom class="collision" size="0.06 0.06" pos="0 0 -0.04" />
+        <body name="upper_arm_link" pos="0 0.138 0" quat="1 0 1 0">
+          <inertial mass="140.415852668972" pos="-0.000990968143618101 -0.0193163441448193 0.0142281541062296" fullinertia="0.137379267305006 0.319076539754203 0.216113513605439 0.0585045413135921 0.15460493059121 -0.0454743130511861" />
+          <joint name="shoulder_lift" frictionloss="5.89416885440174" damping="6.97856381562932" />
+          <geom mesh="upperarm_0" material="linkgray" class="visual" />
+          <geom mesh="upperarm_1" material="black" class="visual" />
+          <geom mesh="upperarm_2" material="jointgray" class="visual" />
+          <geom mesh="upperarm_3" material="urblue" class="visual" />
+          <geom class="collision" pos="0 -0.04 0" quat="1 1 0 0" size="0.06 0.06" />
+          <geom class="collision" size="0.05 0.2" pos="0 0 0.2" />
+          <body name="forearm_link" pos="0 -0.131 0.425">
+            <inertial mass="1.43810933401384" pos="0.0356009651164481 0.0418574247458284 0.197482692154112" fullinertia="1.05502363512144e-08 1.88484352223184e-08 1.83058175059342e-08 0 0 0" />
+            <joint name="elbow" class="joint_limited" frictionloss="8.79158605826971" damping="6.20602342071657" />
+            <geom mesh="forearm_0" material="urblue" class="visual" />
+            <geom mesh="forearm_1" material="linkgray" class="visual" />
+            <geom mesh="forearm_2" material="black" class="visual" />
+            <geom mesh="forearm_3" material="jointgray" class="visual" />
+            <geom class="collision" pos="0 0.08 0" quat="1 1 0 0" size="0.055 0.06" />
+            <geom class="collision" size="0.038 0.19" pos="0 0 0.2" />
+            <body name="wrist_1_link" pos="0 0 0.392" quat="1 0 1 0">
+              <inertial mass="2.59357794901404" pos="0.00998476330183867 0.163379762010861 0.00513490731643428" fullinertia="5.64223989751866e-09 8.11100386155636e-09 8.56403677140793e-09 0 0 0" />
+              <joint name="wrist_1" frictionloss="1.88688051268401" damping="1.35799435113143" />
+              <geom mesh="wrist1_0" material="black" class="visual" />
+              <geom mesh="wrist1_1" material="urblue" class="visual" />
+              <geom mesh="wrist1_2" material="jointgray" class="visual" />
+              <geom class="collision" pos="0 0.05 0" quat="1 1 0 0" size="0.04 0.07" />
+              <body name="wrist_2_link" pos="0 0.127 0">
+                <inertial mass="0.173084611856294" pos="-0.028119830393735 0.0366210291897761 0.0959570612770406" fullinertia="6.73876264431755e-08 8.60369132437821e-08 5.06414503530944e-08 0 0 0" />
+                <joint name="wrist_2" axis="0 0 1" frictionloss="1.32620198889296" damping="1.78943818353346" />
+                <geom mesh="wrist2_0" material="black" class="visual" />
+                <geom mesh="wrist2_1" material="urblue" class="visual" />
+                <geom mesh="wrist2_2" material="jointgray" class="visual" />
+                <geom class="collision" size="0.04 0.06" pos="0 0 0.04" />
+                <geom class="collision" pos="0 0.02 0.1" quat="1 1 0 0" size="0.04 0.04" />
+                <body name="wrist_3_link" pos="0 0 0.1">
+                  <inertial mass="2.16975057226342" pos="0.013149377109144 0.0814364402927532 0.00243013873446396" fullinertia="0.00249014075718443 0.00253803834679075 0.000301350097064623 -0.000148747716670646 -0.000642406252146262 -0.000547256711653801" />
+                  <joint name="wrist_3" frictionloss="1.72381999387903" damping="1.49029746722104" />
+                  <geom material="linkgray" mesh="wrist3" class="visual" />
+                  <geom name="wrist_3_link" class="collision" pos="0 0.025 0" quat="1 1 0 0" size="0.04 0.05" />
+                  <site name="attachment_site" size="0.01" pos="0 0.1 0" quat="-1 1 1 1" rgba="1 0 0 1" group="1" />
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <position class="position" name="shoulder_pan" joint="shoulder_pan" />
+    <position class="position" name="shoulder_lift" joint="shoulder_lift" />
+    <position class="position_limited" name="elbow" joint="elbow" />
+    <position class="position_small" name="wrist_1" joint="wrist_1" />
+    <position class="position_small" name="wrist_2" joint="wrist_2" />
+    <position class="position_small" name="wrist_3" joint="wrist_3" />
+  </actuator>
+  <keyframe>
+    <key name="home" qpos="-1.5708 -1.5708 1.5708 -1.5708 -1.5708 0" ctrl="-1.5708 -1.5708 1.5708 -1.5708 -1.5708 0" />
+  </keyframe>
+</mujoco>

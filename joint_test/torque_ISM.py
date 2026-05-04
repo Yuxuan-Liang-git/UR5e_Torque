@@ -34,7 +34,7 @@ KD_TASK = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=float)
 # --- ISM 参数 ---
 # sigma = S1 * (q - q_t0 - ∫dq) + S2 * (dq - dq_t0 - ∫u)
 S1_ISM = 1.0 * np.array([10.0, 10.0, 10.0, 10.0, 10.0, 10.0], dtype=float)
-UMAX_ISM = 0.0 * np.array([30.0, 15.0, 20.0, 50.0, 50.0, 5000.0], dtype=float)
+UMAX_ISM = 1.0 * np.array([30.0, 15.0, 20.0, 200.0, 400.0, 5000.0], dtype=float)
 
 K_TANH = 10.0 
 
@@ -48,7 +48,7 @@ def signal_handler(sig, frame):
 # --- 轨迹参数 ---
 CIRCLE_RADIUS = 0.06
 CIRCLE_OMEGA = 1.2
-CONTROL_DT = 0.002  # 500Hz
+CONTROL_DT = 0.002 
 VIS_FREQ = 50.0
 
 def get_traj_pos(t: float, x_des_pos_init: np.ndarray, circle_radius: float, circle_omega: float) -> np.ndarray:
@@ -232,6 +232,7 @@ def main():
 
             q = np.array(rtde_r.getActualQ(), dtype=float)
             dq = np.array(rtde_r.getActualQd(), dtype=float)
+            tau_actual = np.array(rtde_c.getJointTorques(), dtype=float)
 
             data.qpos[:6] = q
             data.qvel[:6] = dq
@@ -336,6 +337,8 @@ def main():
                     ism_init = True
                 # 1. 实际速度的变化量 (Actual velocity increment)
                 delta_dq_actual = dq - dq_prev
+                # 更新前一个速度值
+                dq_prev = dq.copy()
                 # 2. 名义加速度带来的期望速度变化量 (Nominal velocity increment)
                 delta_dq_nom = u * CONTROL_DT
                 # 3. 增量式更新滑模面
@@ -366,6 +369,7 @@ def main():
                 "error_q": error_q,
                 "tau": tau,
                 "tau_PD": tau_PD,
+                "tau_actual": tau_actual,
                 "u_pos": u_pos,
                 "u_ori": u_ori,
                 "pos_err": pos_err,
