@@ -384,28 +384,41 @@ class NMPCController(BaseController):
 
 class FrictionCompensator:
     """
-    关节摩擦力补偿器，使用 tau = B * qd + Fc * tanh(qd / epsilon) 模型。
+    关节摩擦力补偿器，使用 joint_fric_WLS.yaml 中的
+    tau = B * qd + Fc * sign(qd) + F0 模型。
     """
-    def __init__(self, param_dir, enabled=True, comp_factor=0.25):
+    def __init__(self, param_path, enabled=True, comp_factor=0.25, vel_threshold=0.01):
         self.enabled = enabled
         self.comp_factor = comp_factor
-        self.param_dir = Path(param_dir)
+        self.param_path = Path(param_path)
+        self.vel_threshold = abs(float(vel_threshold))
         self.params = {}
         
         if self.enabled:
-            for i in range(6):
-                p_path = self.param_dir / f"joint{i}_fric.yaml"
-                if p_path.exists():
-                    with open(p_path, 'r') as f:
-                        data = yaml.safe_load(f)
-                        fric = data.get("Friction", {})
-                        self.params[i] = {
-                            "Fc": fric.get("Fc", 0.0),
-                            "B": fric.get("B", 0.0),
-                            "epsilon": fric.get("epsilon", 0.1)
-                        }
-                else:
-                    print(f"[WARN] Friction parameter file not found at {p_path}")
+            self._load_params()
+
+    def _load_params(self):
+        if not self.param_path.exists():
+            print(f"[WARN] Friction parameter file not found at {self.param_path}")
+            return
+
+        with open(self.param_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+
+        for name, joint_data in (data.get("joints") or {}).items():
+            fric = (joint_data or {}).get("Friction") or {}
+            joint_id = int((joint_data or {}).get("joint_id", name.replace("joint", "")))
+            self.params[joint_id] = {
+                "Fc": float(fric.get("Fc", 0.0)),
+                "Fc_dir": float(fric.get("Fc_dir", fric.get("Fc", 0.0))),
+                "Fc_rev": float(fric.get("Fc_rev", fric.get("Fc", 0.0))),
+                "B": float(fric.get("B", 0.0)),
+                "F0": float(fric.get("F0", (joint_data or {}).get("bias", 0.0))),
+            }
+
+        missing = sorted(set(range(6)) - set(self.params))
+        if missing:
+            print(f"[WARN] Missing friction params for joints: {missing}")
 
     def compute_torque(self, dq):
         """
@@ -418,10 +431,18 @@ class FrictionCompensator:
         tau_comp = np.zeros(6)
         dq = np.asarray(dq)
         for i, m in self.params.items():
+            if i < 0 or i >= tau_comp.shape[0]:
+                continue
             v = dq[i]
             
-            # tau = B * qd + Fc * tanh(qd / epsilon)
-            tau_fric = m['B'] * v + m['Fc'] * np.tanh(v / m['epsilon'])
+            if v > self.vel_threshold:
+                coulomb = m["Fc_dir"]
+            elif v < -self.vel_threshold:
+                coulomb = -m["Fc_rev"]
+            else:
+                coulomb = 0.0
+
+            tau_fric = m["B"] * v + coulomb + m["F0"]
             
             # 综合补偿 * 安全系数
             tau_comp[i] = self.comp_factor * tau_fric

@@ -1,0 +1,67 @@
+source_csv: torque_ctrl/data/identified_params_ur5e.csv
+method: WLS
+parameter_mapping:
+  Fric1: static friction Fc
+  Fric2: viscous damping B
+  Fric3: offset F0
+joints:
+  joint0:
+    joint_id: 0
+    Friction:
+      model: tau = B * qd + Fc * sign(qd) + F0
+      Fc: 13.4218957643
+      Fc_dir: 13.4218957643
+      Fc_rev: 13.4218957643
+      B: 9.47829138727
+      F0: 0.330216261632
+    bias: 0.330216261632
+  joint1:
+    joint_id: 1
+    Friction:
+      model: tau = B * qd + Fc * sign(qd) + F0
+      Fc: 5.87811260836
+      Fc_dir: 5.87811260836
+      Fc_rev: 5.87811260836
+      B: 6.9711859855
+      F0: -0.0632085643984
+    bias: -0.0632085643984
+  joint2:
+    joint_id: 2
+    Friction:
+      model: tau = B * qd + Fc * sign(qd) + F0
+      Fc: 8.99835659256
+      Fc_dir: 8.99835659256
+      Fc_rev: 8.99835659256
+      B: 6.32227294399
+      F0: 0.0607717242006
+    bias: 0.0607717242006
+  joint3:
+    joint_id: 3
+    Friction:
+      model: tau = B * qd + Fc * sign(qd) + F0
+      Fc: 1.66457001283
+      Fc_dir: 1.66457001283
+      Fc_rev: 1.66457001283
+      B: 1.41535707364
+      F0: -0.0271142655144
+    bias: -0.0271142655144
+  joint4:
+    joint_id: 4
+    Friction:
+      model: tau = B * qd + Fc * sign(qd) + F0
+      Fc: 1.32054075897
+      Fc_dir: 1.32054075897
+      Fc_rev: 1.32054075897
+      B: 1.79327810186
+      F0: -0.0119206917948
+    bias: -0.0119206917948
+  joint5:
+    joint_id: 5
+    Friction:
+      model: tau = B * qd + Fc * sign(qd) + F0
+      Fc: 1.69188279904
+      Fc_dir: 1.69188279904
+      Fc_rev: 1.69188279904
+      B: 1.44430860137
+      F0: -0.0194981351855
+    bias: -0.0194981351855

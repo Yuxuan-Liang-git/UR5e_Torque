@@ -187,6 +187,9 @@ def resolve_config_path(config_path: Path, path_value: str | Path) -> Path:
     candidate = Path.cwd() / path
     if candidate.exists():
         return candidate
+    candidate = config_path.resolve().parent / path
+    if candidate.exists():
+        return candidate
     return config_path.resolve().parent.parent / path
 
 
@@ -243,7 +246,17 @@ def main():
 
     pdjoint_controller = PDJointController(model=model, kp=kp, kd=kd, torque_limits=torque_limits)
     nmpc_controller = NMPCController(model=model, config_path=args.config, rebuild=rebuild_solver)
-    friction_compensator = FrictionCompensator(param_dir="config", enabled=True, comp_factor=1.0)
+    fric_cfg = cfg.get("friction_compensation", {})
+    fric_param_path = resolve_config_path(
+        Path(args.config),
+        fric_cfg.get("param_file", "config/joint_fric_WLS.yaml"),
+    )
+    friction_compensator = FrictionCompensator(
+        param_path=fric_param_path,
+        enabled=bool(fric_cfg.get("enabled", True)),
+        comp_factor=float(fric_cfg.get("comp_factor", 1.0)),
+        vel_threshold=float(fric_cfg.get("vel_threshold", 0.01)),
+    )
     
     ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
     if ee_site_id == -1:
@@ -486,7 +499,7 @@ def main():
             if traj_started:
                 tau_pd = pdjoint_controller.compute_torque(q_nmpc, q, dq_nmpc, dq)
                 # tau = tau_nmpc + 0.3 * tau_pd + tau_fric
-                tau = tau_nmpc + 0.5 * tau_fric + 0.0 * tau_pd
+                tau = tau_nmpc + tau_fric + 0.0 * tau_pd
 
                 # tau_pd = pdjoint_controller.compute_torque(q_des, q, dq_des, dq)
                 # tau = tau_pd

@@ -59,14 +59,14 @@
       <geom mesh="base_0" material="black" class="visual" />
       <geom mesh="base_1" material="jointgray" class="visual" />
       <body name="shoulder_link" pos="0 0 0.163">
-        <inertial mass="3.70025277794" pos="0 0 0" diaginertia="3.98315914757e-08 0.0110311884506 0.0110311884506" quat="0.707106781187 0 -0.707106781187 0" />
+        <inertial mass="3.70000326474" pos="0 0 0" diaginertia="7.88343938225e-08 0.0102560854813 0.0102560854813" quat="0.707106781187 0 -0.707106781187 0" />
         <joint name="shoulder_pan" axis="0 0 1" />
         <geom mesh="shoulder_0" material="urblue" class="visual" />
         <geom mesh="shoulder_1" material="black" class="visual" />
         <geom mesh="shoulder_2" material="jointgray" class="visual" />
         <geom class="collision" size="0.06 0.06" pos="0 0 -0.04" />
         <body name="upper_arm_link" pos="0 0.138 0" quat="1 0 1 0">
-          <inertial mass="13.6734604516" pos="-0.00274924070536 -0.154211532115 0.155925313924" diaginertia="1.15371703788e-07 0.344621184978 0.344621323046" quat="0.96394346101 -0.0905454832898 0.202227945384 -0.147371562852" />
+          <inertial mass="10.4428446061" pos="-0.00351305434309 -0.148382675471 0.194271711342" diaginertia="1.83244909246e-08 0.497372764755 0.497372816565" quat="0.954777526501 -0.147979747048 0.194689787943 -0.169108710075" />
           <joint name="shoulder_lift" />
           <geom mesh="upperarm_0" material="linkgray" class="visual" />
           <geom mesh="upperarm_1" material="black" class="visual" />
@@ -75,7 +75,7 @@
           <geom class="collision" pos="0 -0.04 0" quat="1 1 0 0" size="0.06 0.06" />
           <geom class="collision" size="0.05 0.2" pos="0 0 0.2" />
           <body name="forearm_link" pos="0 -0.131 0.425">
-            <inertial mass="1.77738181549" pos="0.0103118674244 0.294343208091 0.333004640374" diaginertia="0 0.501163195423 0.50116332714" quat="0.0627191411029 0.513797684791 0.854183563022 0.0494842308839" />
+            <inertial mass="2.20333437022" pos="0.00536685976622 0.265737467298 0.300910295989" diaginertia="0.0863616836403 0.405945272141 0.492306962693" quat="-0.302781379519 0.853134307867 -0.329327628248 0.268381449117" />
             <joint name="elbow" class="joint_limited" />
             <geom mesh="forearm_0" material="urblue" class="visual" />
             <geom mesh="forearm_1" material="linkgray" class="visual" />
@@ -84,14 +84,14 @@
             <geom class="collision" pos="0 0.08 0" quat="1 1 0 0" size="0.055 0.06" />
             <geom class="collision" size="0.038 0.19" pos="0 0 0.2" />
             <body name="wrist_1_link" pos="0 0 0.392" quat="1 0 1 0">
-              <inertial mass="0.861868936932" pos="0.0429631864834 0.604093637811 -0.109661467008" diaginertia="2.00865386915e-08 0.877325471862 0.877325519776" quat="0.708273984051 -0.207828782533 0.0619776796667 -0.671799023437" />
+              <inertial mass="1.3360172296" pos="-0.00202009337294 0.454785766841 -0.0748917210054" diaginertia="1.61327009338e-08 0.891188675982 0.891188709899" quat="0.586217417583 0.272993516615 0.438194254995 0.6243472384" />
               <joint name="wrist_1" />
               <geom mesh="wrist1_0" material="black" class="visual" />
               <geom mesh="wrist1_1" material="urblue" class="visual" />
               <geom mesh="wrist1_2" material="jointgray" class="visual" />
               <geom class="collision" pos="0 0.05 0" quat="1 1 0 0" size="0.04 0.07" />
               <body name="wrist_2_link" pos="0 0.127 0">
-                <inertial mass="2.05152243131" pos="-0.013391407434 0.0561693444017 0.100741180457" diaginertia="0 0.000262825381954 0.000262831286989" quat="0.884116990094 0.340063135686 0.126851893498 0.294283551512" />
+                <inertial mass="1.83983968825" pos="0.00261303568376 0.0790182941654 0.158351374953" diaginertia="3.24525545679e-08 0.041265116675 0.0412651555299" quat="-0.226567812471 0.327351712068 -0.470792931387 0.787313088113" />
                 <joint name="wrist_2" axis="0 0 1" />
                 <geom mesh="wrist2_0" material="black" class="visual" />
                 <geom mesh="wrist2_1" material="urblue" class="visual" />
@@ -99,7 +99,7 @@
                 <geom class="collision" size="0.04 0.06" pos="0 0 0.04" />
                 <geom class="collision" pos="0 0.02 0.1" quat="1 1 0 0" size="0.04 0.04" />
                 <body name="wrist_3_link" pos="0 0 0.1">
-                  <inertial mass="1.29290686203" pos="0.0267448585417 0.0681749771558 0.00401816684552" quat="0.618256171169 -0.110852935474 0.702856283329 -0.333862214834" diaginertia="0 0.107223099679 0.107223113585" />
+                  <inertial mass="0.788425378583" pos="0.00015250572387 0.0691418353174 0.00306121265554" quat="0.456690721238 0.536733325544 -0.298459316407 0.64364039559" diaginertia="0.0127828401268 0.0573967155514 0.0701795574531" />
                   <joint name="wrist_3" />
                   <geom material="linkgray" mesh="wrist3" class="visual" />
                   <geom name="wrist_3_link" class="collision" pos="0 0.025 0" quat="1 1 0 0" size="0.04 0.05" />
