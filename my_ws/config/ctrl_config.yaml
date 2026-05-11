@@ -46,6 +46,8 @@ nmpc_controller:
   # Pinocchio/acados dynamics model.
   # mjcf_path: script/universal_robots_ur5e/ur5e.xml
   mjcf_path: script/universal_robots_ur5e/ur5e_iden.xml
+  # mjcf_path: script/universal_robots_ur5e/ur5e_iden_ref.xml
+
 
   frame_name: attachment_site
   json_file: acados_ocp_ur5e.json
