@@ -4,9 +4,9 @@ NMPC 参数调试实机脚本。
 
 脚本流程：
   1. 读取 config/home_pos.txt，将机械臂用关节 PD 拉到 home 姿态。
-  2. 以 home 姿态为基准，对 JOINT_SELECT 中的关节叠加傅里叶级数参考。
+  2. 以 home 姿态为基准，对 JOINT_SELECT 中的关节叠加傅里叶级数参考，并降采样成 10Hz 阶梯参考。
   3. 先使用 NMPC + 局部 PD 稳定器进行 10s 跟踪测试。
-  4. 回到 home 姿态后，使用关节 PD 对同一条正弦参考重复一次实验。
+  4. 回到 home 姿态后，使用关节 PD 对同一条 ZOH 保持参考重复一次实验。
   5. 退出时先清零力矩并停止 UR 脚本，再保存 raw CSV、metrics 和每个测试轴的对比 PNG。
 
 注意：
@@ -43,7 +43,7 @@ from Controller import FrictionCompensator, NMPCController, PDJointController  #
 
 # ======================== 手动调参入口 ========================
 # 0-based 关节编号：4/5 表示第 5/6 轴。
-JOINT_SELECT = [4, 5]
+JOINT_SELECT = [4]
 # 每个关节都可以单独设置傅里叶级数参数；未选中关节即使配置了也不会运动。
 FOURIER_FREQ = np.array(
     [
@@ -51,8 +51,8 @@ FOURIER_FREQ = np.array(
         [0.4, 0.7, 1.0],
         [0.4, 0.7, 1.0],
         [0.4, 0.7, 1.0],
-        [0.4, 0.7, 1.0],
-        [0.4, 1.0, 1.5],
+        [0.4, 0.7, 1.5],
+        [0.5, 1.0, 2.0],
     ],
     dtype=float,
 )
@@ -69,6 +69,8 @@ FOURIER_PHASE_DEG = np.array(
     dtype=float,
 )
 RUN_SECONDS = 10.0
+# 模拟 VLA 低频动作点输出：连续参考先以 10Hz 采样，再由底层控制 ZOH 保持。
+REFERENCE_SAMPLE_HZ = 10.0
 # ==============================================================
 
 
@@ -146,6 +148,8 @@ def validate_sine_params() -> None:
         raise ValueError("FOURIER_FREQ values must be >= 0")
     if np.any(FOURIER_ALPHA < 0.0):
         raise ValueError("FOURIER_ALPHA values must be >= 0")
+    if REFERENCE_SAMPLE_HZ <= 0.0:
+        raise ValueError("REFERENCE_SAMPLE_HZ must be > 0")
     for joint in JOINT_SELECT:
         if not 0 <= int(joint) < 6:
             raise ValueError(f"JOINT_SELECT contains invalid joint index: {joint}")
@@ -168,34 +172,72 @@ def axes_tag() -> str:
     return "_".join(str(int(j)) for j in JOINT_SELECT)
 
 
-def sine_reference(q_home: np.ndarray, t: float) -> tuple[np.ndarray, np.ndarray]:
-    """生成当前时刻的 6 维傅里叶级数参考位置和速度。"""
+def continuous_fourier_reference(q_home: np.ndarray, t: float) -> np.ndarray:
+    """生成连续时间傅里叶级数参考位置，仅作为 10Hz 采样源。"""
 
     q_ref = q_home.copy()
-    dq_ref = np.zeros(6)
     for joint in JOINT_SELECT:
         j = int(joint)
         phases = np.deg2rad(FOURIER_PHASE_DEG[j])
         signal = 0.0
-        signal_dot = 0.0
         for harmonic, phase in enumerate(phases, start=1):
             coeff = FOURIER_ALPHA[j] / float(harmonic**2)
             omega = 2.0 * np.pi * FOURIER_FREQ[j, harmonic - 1]
             angle = omega * t + phase
             signal += coeff * np.sin(angle)
-            signal_dot += coeff * omega * np.cos(angle)
         q_ref[j] = q_home[j] + signal
-        dq_ref[j] = signal_dot
+    return q_ref
+
+
+def reference_sample_period() -> float:
+    """上层 VLA/轨迹点的采样周期。"""
+
+    return 1.0 / REFERENCE_SAMPLE_HZ
+
+
+def zoh_sample_index(t: float) -> int:
+    """计算 t 时刻对应的 10Hz 参考采样点编号。"""
+
+    return int(np.floor(max(float(t), 0.0) / reference_sample_period()))
+
+
+def zoh_reference_from_index(q_home: np.ndarray, sample_index: int) -> np.ndarray:
+    """按采样点编号读取参考；同一编号内的控制周期保持上一参考值。"""
+
+    sample_t = max(int(sample_index), 0) * reference_sample_period()
+    return continuous_fourier_reference(q_home, sample_t)
+
+
+def sine_reference(q_home: np.ndarray, t: float) -> tuple[np.ndarray, np.ndarray]:
+    """生成 10Hz ZOH 保持后的参考位置；速度参考固定为 0。
+
+    控制循环和 NMPC 预测步长仍按各自 dt 运行；只有当时间跨过 10Hz 采样边界时，
+    上层参考才更新，否则沿用上一个采样点的值。
+    """
+
+    q_ref = zoh_reference_from_index(q_home, zoh_sample_index(t))
+    dq_ref = np.zeros(6)
     return q_ref, dq_ref
 
 
 def build_ref_batch(q_home: np.ndarray, elapsed: float, horizon_steps: int, dt: float) -> np.ndarray:
-    """为 NMPC 构造 N+1 个未来正弦参考点。"""
+    """为 NMPC 构造 N+1 个未来阶梯参考点。
+
+    注意这里不是把 NMPC 步长改成 10Hz，而是按 NMPC 的 dt 逐步递推时间：
+    若未来节点还没跨过 10Hz 参考采样边界，就继续填入上一参考值；
+    跨过边界后才更新为新的上层参考点。
+    """
 
     ref_q = np.zeros((6, horizon_steps + 1))
+    current_sample_index = None
+    current_q_ref = None
     for k in range(horizon_steps + 1):
-        qk, _ = sine_reference(q_home, elapsed + k * dt)
-        ref_q[:, k] = qk
+        future_t = elapsed + k * dt
+        sample_index = zoh_sample_index(future_t)
+        if current_sample_index != sample_index:
+            current_sample_index = sample_index
+            current_q_ref = zoh_reference_from_index(q_home, sample_index)
+        ref_q[:, k] = current_q_ref
     return ref_q
 
 
@@ -332,7 +374,80 @@ def load_log(path: Path) -> dict[str, np.ndarray]:
     return {name: np.asarray(arr[name], dtype=float) for name in arr.dtype.names}
 
 
-def compute_joint_metrics(log: dict[str, np.ndarray], joint: int, controller: str) -> dict[str, float]:
+def median_sample_dt(log: dict[str, np.ndarray]) -> float:
+    """从日志时间戳估计采样周期，避免首个 control_dt 异常影响微分。"""
+
+    t = np.asarray(log["t"], dtype=float)
+    if t.size < 2:
+        return 0.0
+    diff_t = np.diff(t)
+    diff_t = diff_t[diff_t > 1e-6]
+    return float(np.median(diff_t)) if diff_t.size else 0.0
+
+
+def compute_joint_acc_signal(log: dict[str, np.ndarray], joint: int) -> np.ndarray:
+    """由关节速度差分估计测试关节角加速度曲线。"""
+
+    dt = median_sample_dt(log)
+    dq = np.asarray(log[f"dq_{joint}"], dtype=float)
+    if dt <= 0.0 or dq.size < 2:
+        return np.zeros_like(dq)
+    return np.gradient(dq, dt)
+
+
+def compute_joint_acc_rms(log: dict[str, np.ndarray], joint: int) -> float:
+    """由关节角加速度曲线计算 RMS。"""
+
+    ddq = compute_joint_acc_signal(log, joint)
+    return float(np.sqrt(np.mean(ddq**2))) if ddq.size else 0.0
+
+
+def find_ee_site_id(model: mujoco.MjModel) -> int:
+    """查找末端 site，用关节轨迹重算末端位置。"""
+
+    for site_name in ("attachment_site", "eef_site", "ee_site"):
+        site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
+        if site_id != -1:
+            return site_id
+    raise ValueError("Cannot find end-effector site: attachment_site/eef_site/ee_site")
+
+
+def compute_ee_acc_norm_signal(log: dict[str, np.ndarray], model: mujoco.MjModel, ee_site_id: int) -> np.ndarray:
+    """由关节位置日志重算末端位置，并差分估计末端加速度范数曲线。"""
+
+    dt = median_sample_dt(log)
+    t = np.asarray(log["t"], dtype=float)
+    if dt <= 0.0 or t.size < 3:
+        return np.zeros_like(t)
+
+    data = mujoco.MjData(model)
+    ee_pos = np.zeros((t.size, 3))
+    for i in range(t.size):
+        q = np.asarray([log[f"q_{j}"][i] for j in range(6)], dtype=float)
+        dq = np.asarray([log[f"dq_{j}"][i] for j in range(6)], dtype=float)
+        data.qpos[:6] = q
+        data.qvel[:6] = dq
+        mujoco.mj_forward(model, data)
+        ee_pos[i] = data.site_xpos[ee_site_id]
+
+    ee_vel = np.gradient(ee_pos, dt, axis=0)
+    ee_acc = np.gradient(ee_vel, dt, axis=0)
+    return np.linalg.norm(ee_acc, axis=1)
+
+
+def compute_ee_acc_rms(log: dict[str, np.ndarray], model: mujoco.MjModel, ee_site_id: int) -> float:
+    """由末端加速度范数曲线计算 RMS。"""
+
+    ee_acc_norm = compute_ee_acc_norm_signal(log, model, ee_site_id)
+    return float(np.sqrt(np.mean(ee_acc_norm**2)))
+
+
+def compute_joint_metrics(
+    log: dict[str, np.ndarray],
+    joint: int,
+    controller: str,
+    ee_acc_rms: float,
+) -> dict[str, float]:
     """计算单个测试关节的跟踪误差和力矩指标。"""
 
     t = log["t"]
@@ -356,6 +471,8 @@ def compute_joint_metrics(log: dict[str, np.ndarray], joint: int, controller: st
         "Tau_RMS": float(np.sqrt(np.mean(tau**2))),
         "Tau_peak": float(np.max(np.abs(tau))),
         "dTau_RMS": float(np.sqrt(np.mean(dtau**2))),
+        "JointAcc_RMS": compute_joint_acc_rms(log, joint),
+        "EEAcc_RMS": float(ee_acc_rms),
         "Mean_solve_time_ms": float(np.mean(solve_time)),
         "Max_solve_time_ms": float(np.max(solve_time)),
         "Mean_control_freq": mean_freq,
@@ -375,7 +492,8 @@ def params_text(cfg: dict, alpha: float, joint: int) -> str:
         f"V={v_weight}\n"
         f"R={r_weight}, alpha={alpha:.3g}\n"
         f"joint={joint}, Fourier f={FOURIER_FREQ[joint].tolist()}Hz, "
-        f"a={FOURIER_ALPHA[joint]:.3g}rad, phi={FOURIER_PHASE_DEG[joint].tolist()}deg"
+        f"a={FOURIER_ALPHA[joint]:.3g}rad, phi={FOURIER_PHASE_DEG[joint].tolist()}deg, "
+        f"ZOH={REFERENCE_SAMPLE_HZ:.3g}Hz"
     )
 
 
@@ -389,8 +507,10 @@ def save_joint_plot(
     cfg: dict,
     alpha: float,
     joint: int,
+    model: mujoco.MjModel,
+    ee_site_id: int,
 ) -> Path:
-    """保存单个测试关节的 NMPC/PD 跟踪、误差和力矩对比图。"""
+    """保存单个测试关节的 NMPC/PD 跟踪、误差、力矩和抖动对比图。"""
 
     t_nmpc = nmpc_log["t"]
     q_ref_nmpc = nmpc_log[f"q_ref_{joint}"]
@@ -399,8 +519,10 @@ def save_joint_plot(
     tau_nmpc_total = nmpc_log[f"tau_{joint}"]
     tau_nmpc_component = nmpc_log[f"tau_nmpc_{joint}"]
     tau_nmpc_pd_component = nmpc_log[f"tau_nmpc_pd_{joint}"]
+    joint_acc_nmpc = compute_joint_acc_signal(nmpc_log, joint)
+    ee_acc_nmpc = compute_ee_acc_norm_signal(nmpc_log, model, ee_site_id)
 
-    fig, axes = plt.subplots(4, 1, figsize=(11, 11), sharex=True)
+    fig, axes = plt.subplots(6, 1, figsize=(11, 15), sharex=True)
     fig.suptitle(f"NMPC sine tracking joint {joint}\n{params_text(cfg, alpha, joint)}", fontsize=10)
 
     axes[0].plot(t_nmpc, q_ref_nmpc, "k--", label="q_ref")
@@ -419,12 +541,15 @@ def save_joint_plot(
     if pd_metrics is None:
         axes[1].set_title(
             f"NMPC RMSE={nmpc_metrics['RMSE_q']:.4g} rad, "
-            f"Max={nmpc_metrics['Max_abs_error']:.4g} rad"
+            f"Max={nmpc_metrics['Max_abs_error']:.4g} rad | "
+            f"ddq RMS={nmpc_metrics['JointAcc_RMS']:.4g} rad/s^2"
         )
     else:
         axes[1].set_title(
             f"NMPC RMSE={nmpc_metrics['RMSE_q']:.4g} rad, "
-            f"PD RMSE={pd_metrics['RMSE_q']:.4g} rad"
+            f"PD RMSE={pd_metrics['RMSE_q']:.4g} rad | "
+            f"ddq RMS: NMPC={nmpc_metrics['JointAcc_RMS']:.4g}, "
+            f"PD={pd_metrics['JointAcc_RMS']:.4g} rad/s^2"
         )
     axes[1].grid(True)
     axes[1].legend()
@@ -436,12 +561,15 @@ def save_joint_plot(
     if pd_metrics is None:
         axes[2].set_title(
             f"NMPC Tau_RMS={nmpc_metrics['Tau_RMS']:.4g} Nm, "
-            f"Tau_peak={nmpc_metrics['Tau_peak']:.4g} Nm"
+            f"Tau_peak={nmpc_metrics['Tau_peak']:.4g} Nm | "
+            f"EE acc RMS={nmpc_metrics['EEAcc_RMS']:.4g} m/s^2"
         )
     else:
         axes[2].set_title(
             f"NMPC Tau_RMS={nmpc_metrics['Tau_RMS']:.4g} Nm, "
-            f"PD Tau_RMS={pd_metrics['Tau_RMS']:.4g} Nm"
+            f"PD Tau_RMS={pd_metrics['Tau_RMS']:.4g} Nm | "
+            f"EE acc RMS: NMPC={nmpc_metrics['EEAcc_RMS']:.4g}, "
+            f"PD={pd_metrics['EEAcc_RMS']:.4g} m/s^2"
         )
     axes[2].grid(True)
     axes[2].legend()
@@ -450,10 +578,40 @@ def save_joint_plot(
     axes[3].plot(t_nmpc, tau_nmpc_pd_component, label="NMPC tau_nmpc_pd")
     if pd_log is not None:
         axes[3].plot(pd_log["t"], pd_log[f"tau_pd_{joint}"], label="PD tau_pd", alpha=0.8)
-    axes[3].set_xlabel("t [s]")
     axes[3].set_ylabel("component tau [Nm]")
     axes[3].grid(True)
     axes[3].legend()
+
+    axes[4].plot(t_nmpc, joint_acc_nmpc, label="NMPC ddq")
+    if pd_log is not None:
+        joint_acc_pd = compute_joint_acc_signal(pd_log, joint)
+        axes[4].plot(pd_log["t"], joint_acc_pd, label="PD ddq", alpha=0.85)
+    axes[4].set_ylabel("ddq [rad/s^2]")
+    if pd_metrics is None:
+        axes[4].set_title(f"Joint acceleration RMS: NMPC={nmpc_metrics['JointAcc_RMS']:.4g} rad/s^2")
+    else:
+        axes[4].set_title(
+            f"Joint acceleration RMS: NMPC={nmpc_metrics['JointAcc_RMS']:.4g}, "
+            f"PD={pd_metrics['JointAcc_RMS']:.4g} rad/s^2"
+        )
+    axes[4].grid(True)
+    axes[4].legend()
+
+    axes[5].plot(t_nmpc, ee_acc_nmpc, label="NMPC |ee acc|")
+    if pd_log is not None:
+        ee_acc_pd = compute_ee_acc_norm_signal(pd_log, model, ee_site_id)
+        axes[5].plot(pd_log["t"], ee_acc_pd, label="PD |ee acc|", alpha=0.85)
+    axes[5].set_xlabel("t [s]")
+    axes[5].set_ylabel("|ee acc| [m/s^2]")
+    if pd_metrics is None:
+        axes[5].set_title(f"End-effector acceleration RMS: NMPC={nmpc_metrics['EEAcc_RMS']:.4g} m/s^2")
+    else:
+        axes[5].set_title(
+            f"End-effector acceleration RMS: NMPC={nmpc_metrics['EEAcc_RMS']:.4g}, "
+            f"PD={pd_metrics['EEAcc_RMS']:.4g} m/s^2"
+        )
+    axes[5].grid(True)
+    axes[5].legend()
 
     fig.tight_layout()
     out = fig_dir / f"{run_id}_joint{joint}.png"
@@ -475,6 +633,8 @@ def save_metrics(metrics_dir: Path, run_id: str, metrics: list[dict[str, float]]
         "Tau_RMS",
         "Tau_peak",
         "dTau_RMS",
+        "JointAcc_RMS",
+        "EEAcc_RMS",
         "Mean_solve_time_ms",
         "Max_solve_time_ms",
         "Mean_control_freq",
@@ -496,27 +656,47 @@ def analyze_and_plot(
     run_id: str,
     cfg: dict,
     alpha: float,
+    model: mujoco.MjModel,
 ) -> None:
     """读取 raw CSV，生成每个测试关节的 NMPC/PD 对比图和汇总指标。"""
 
     nmpc_log = load_log(nmpc_raw_path)
     pd_log = load_log(pd_raw_path) if pd_raw_path is not None else None
+    ee_site_id = find_ee_site_id(model)
+    nmpc_ee_acc_rms = compute_ee_acc_rms(nmpc_log, model, ee_site_id)
+    pd_ee_acc_rms = compute_ee_acc_rms(pd_log, model, ee_site_id) if pd_log is not None else 0.0
+
     all_metrics = []
     for joint in JOINT_SELECT:
         j = int(joint)
-        nmpc_metrics = compute_joint_metrics(nmpc_log, j, "NMPC")
+        nmpc_metrics = compute_joint_metrics(nmpc_log, j, "NMPC", nmpc_ee_acc_rms)
         all_metrics.append(nmpc_metrics)
         if pd_log is not None:
-            pd_metrics = compute_joint_metrics(pd_log, j, "PD")
+            pd_metrics = compute_joint_metrics(pd_log, j, "PD", pd_ee_acc_rms)
             all_metrics.append(pd_metrics)
         else:
             pd_metrics = None
-        fig_path = save_joint_plot(fig_dir, run_id, nmpc_log, nmpc_metrics, pd_log, pd_metrics, cfg, alpha, j)
+        fig_path = save_joint_plot(
+            fig_dir=fig_dir,
+            run_id=run_id,
+            nmpc_log=nmpc_log,
+            nmpc_metrics=nmpc_metrics,
+            pd_log=pd_log,
+            pd_metrics=pd_metrics,
+            cfg=cfg,
+            alpha=alpha,
+            joint=j,
+            model=model,
+            ee_site_id=ee_site_id,
+        )
         print(f"[INFO] Figure: {fig_path}")
 
     metrics_path = save_metrics(metrics_dir, run_id, all_metrics)
     print(f"[INFO] Metrics: {metrics_path}")
-    print("\ncontroller,joint,RMSE_q,Max_abs_error,Tau_RMS,Tau_peak,dTau_RMS,Mean_solve_time_ms,Mean_control_freq")
+    print(
+        "\ncontroller,joint,RMSE_q,Max_abs_error,Tau_RMS,Tau_peak,dTau_RMS,"
+        "JointAcc_RMS,EEAcc_RMS,Mean_solve_time_ms,Mean_control_freq"
+    )
     for row in all_metrics:
         print(
             f"{row['controller']},"
@@ -526,6 +706,8 @@ def analyze_and_plot(
             f"{row['Tau_RMS']:.6g},"
             f"{row['Tau_peak']:.6g},"
             f"{row['dTau_RMS']:.6g},"
+            f"{row['JointAcc_RMS']:.6g},"
+            f"{row['EEAcc_RMS']:.6g},"
             f"{row['Mean_solve_time_ms']:.6g},"
             f"{row['Mean_control_freq']:.6g}"
         )
@@ -771,7 +953,7 @@ def run() -> None:
         print(f"[INFO] Saved PD raw log: {pd_raw_path}")
     else:
         pd_raw_path = None
-    analyze_and_plot(nmpc_raw_path, pd_raw_path, fig_dir, metrics_dir, run_id, cfg, args.alpha)
+    analyze_and_plot(nmpc_raw_path, pd_raw_path, fig_dir, metrics_dir, run_id, cfg, args.alpha, model)
 
 
 if __name__ == "__main__":
