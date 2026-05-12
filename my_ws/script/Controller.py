@@ -339,16 +339,10 @@ class NMPCController(BaseController):
         计算 NMPC 力矩。
         ref_q_batch: [6, N+1] 参考关节位置序列
         """
-        # 计算关节速度序列 (中心差分)
+        # VLA/上层策略通常只输出离散关节位置点，并不提供可信的速度参考。
+        # 直接对稀疏或抖动的位置参考做差分会把噪声放大到速度项里，
+        # 因此这里将未来参考速度统一置 0，让速度代价承担阻尼/平滑作用。
         ref_dq_batch = np.zeros_like(ref_q_batch)
-        for k in range(self.N):
-            if k == 0:
-                ref_dq_batch[:, k] = (ref_q_batch[:, 1] - ref_q_batch[:, 0]) / self.dt
-            elif k == self.N:
-                ref_dq_batch[:, k] = (ref_q_batch[:, k] - ref_q_batch[:, k-1]) / self.dt
-            else:
-                ref_dq_batch[:, k] = (ref_q_batch[:, k+1] - ref_q_batch[:, k-1]) / (2.0 * self.dt)
-        ref_dq_batch[:, self.N] = ref_dq_batch[:, self.N-1]
 
         # 1. 状态
         x0 = np.concatenate([q, dq])
